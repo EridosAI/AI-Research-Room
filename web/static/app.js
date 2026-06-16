@@ -130,7 +130,9 @@ function renderRound(b) {
   if (b.judge) {
     const syn = document.createElement("div"); syn.className = "synthesis";
     const n = b.panels.length;
-    syn.appendChild(whoLine(b.judge.speaker, colorOf(b.judge.speaker), `synthesis · ${n} panelist${n === 1 ? "" : "s"}`));
+    const ff = b.judge.meta && b.judge.meta.judge_fallback_from;
+    const extra = `synthesis · ${n} panelist${n === 1 ? "" : "s"}` + (ff ? ` · judge fell back from ${ff}` : "");
+    syn.appendChild(whoLine(b.judge.speaker, colorOf(b.judge.speaker), extra));
     const body = document.createElement("div"); renderMd(body, b.judge.text); syn.appendChild(body);
     div.appendChild(syn);
   }
@@ -150,6 +152,22 @@ function renderAddressee() {
   const sel = $("#addressee");
   sel.innerHTML = '<option value="">auto (last AI)</option>' +
     STATE.participants.filter((p) => p.enabled).map((p) => `<option value="${p.name}">@${p.name}</option>`).join("");
+}
+
+function renderPanelPick() {
+  const box = $("#panel-pick"); box.innerHTML = "";
+  const enabled = STATE.participants.filter((p) => p.enabled);
+  if (!enabled.length) return;
+  box.append(document.createTextNode("· panel:"));
+  for (const p of enabled) {
+    const lab = el("label", "pickitem");
+    const cb = el("input"); cb.type = "checkbox"; cb.value = p.name; cb.checked = true;
+    lab.append(cb, dot(p.color), document.createTextNode(p.name));
+    box.append(lab);
+  }
+}
+function pickedPanel() {
+  return [...document.querySelectorAll("#panel-pick input:checked")].map((i) => i.value);
 }
 
 async function refreshTranscriptList() {
@@ -177,9 +195,10 @@ async function send() {
   try {
     let data;
     if (mode === "research") {
-      const n = STATE.participants.filter((p) => p.enabled).length;
-      setStatus(`research: ${n} models thinking + judge… (can take a while)`, true);
-      data = await api("/research", "POST", { prompt: text, effort: $("#effort").value });
+      const panel = pickedPanel();
+      if (!panel.length) { banner("select at least one model for the research panel"); $("#send-btn").disabled = false; return; }
+      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} thinking + judge… (can take a while)`, true);
+      data = await api("/research", "POST", { prompt: text, effort: $("#effort").value, panel });
     } else {
       const addressed_to = $("#addressee").value || null;
       setStatus(`converse: ${addressed_to ? "@" + addressed_to : "(last AI)"} thinking…`, true);
@@ -222,7 +241,7 @@ function lbl(t) { const e = el("label"); e.textContent = t; return e; }
 async function refreshParticipants() {
   const part = await api("/participants");
   STATE.participants = part.participants || [];
-  renderAddressee(); render();
+  renderAddressee(); renderPanelPick(); render();
 }
 
 function providerCard(p) {
@@ -366,7 +385,7 @@ $("#add-btn").addEventListener("click", async () => {
   try {
     const part = await api("/participants");
     STATE.participants = part.participants || [];
-    renderAddressee();
+    renderAddressee(); renderPanelPick();
     adoptTranscript(await api("/transcript"));
     await refreshTranscriptList();
   } catch (e) { banner(`could not reach engine: ${e.message}`); }

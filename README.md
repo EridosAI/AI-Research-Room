@@ -5,8 +5,9 @@ local web UI) that let several LLMs — Claude, Grok, Kimi, DeepSeek, or any
 OpenAI-compatible endpoint you add — work the same shared transcript. Two modes:
 
 - **converse** — address one model; it answers seeing the conversation so far.
-- **research** — every enabled model answers the prompt **blind and in parallel**, then a
-  **judge** model synthesizes their answers into one (the "fusion" pattern).
+- **research** — a panel of models answers the prompt **blind and in parallel**, then a
+  **judge** model synthesizes their answers into one (the "fusion" pattern). You pick which
+  models join each round.
 
 The engine owns the transcript and all orchestration; clients are pure views over it. The
 transcript is append-only JSONL in a git-tracked (Obsidian-friendly) vault — **API keys
@@ -28,7 +29,9 @@ never go there**.
 - **Subscription or API per provider.** `auth_mode` is `api` (HTTP + key) or `cli` (shell out
   to an agentic CLI runner, e.g. Grok on a SuperGrok subscription — **no key**).
 - **Graceful degradation.** A failed panelist is dropped and marked *absent* (never treated
-  as agreement); a round aborts only if everyone fails.
+  as agreement); a round aborts only if everyone fails. If the **judge** itself is
+  unavailable (no key / down), it falls back to a panelist that answered, so a bad judge
+  can't sink an otherwise-good round.
 
 ## Security model (the part that matters)
 
@@ -88,8 +91,9 @@ python -m web.server        # → http://127.0.0.1:8765
 
 A single static page (vanilla HTML/JS, `marked` + `DOMPurify` from CDN, no build step): a
 colour-coded transcript stream, research rounds rendered as one composite block (collapsed
-panel cards with "view full" above a foregrounded synthesis), a composer with a mode toggle
-and addressee selector, and a **⚙ providers** panel to enter keys, test connections, pick
+panel cards with "view full" above a foregrounded synthesis), a composer with a mode toggle,
+an addressee selector (converse) and a per-round model picker (research), and a **⚙ providers**
+panel to enter keys, test connections, pick
 models, toggle a provider to subscription/CLI, choose the judge, and add new providers.
 
 ### CLI

@@ -100,6 +100,9 @@ select { background: var(--panel-2); color: var(--text); border: 1px solid var(-
 .composer-row:last-child { margin-bottom: 0; }
 .mode { font-size: 13px; color: var(--muted); cursor: pointer; }
 .hint { font-size: 12px; color: var(--muted); }
+.panel-pick { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.panel-pick .pickitem { display: inline-flex; align-items: center; cursor: pointer; }
+.panel-pick .pickitem input { margin-right: 3px; }
 #input { flex: 1; resize: vertical; background: var(--panel-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
 #send-btn { align-self: stretch; padding: 0 22px; }

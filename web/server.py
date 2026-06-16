@@ -36,6 +36,7 @@ _last_test: dict[str, dict] = {}   # in-memory last test result per provider
 class ResearchBody(BaseModel):
     prompt: str
     effort: str = "medium"
+    panel: list[str] | None = None   # per-round model selection; None = all enabled
 
 
 class ConverseBody(BaseModel):
@@ -120,9 +121,15 @@ def _transcript_state() -> dict:
 def post_research(body: ResearchBody) -> dict:
     if not body.prompt.strip():
         raise HTTPException(400, "prompt required")
+    if body.panel is not None:
+        unknown = [p for p in body.panel if p not in providers.registry()]
+        if unknown:
+            raise HTTPException(400, f"unknown providers: {', '.join(unknown)}")
+        if not body.panel:
+            raise HTTPException(400, "select at least one model for the research panel")
     with _lock:
         try:
-            synthesis = modes.research(body.prompt, effort=body.effort)
+            synthesis = modes.research(body.prompt, panel=body.panel, effort=body.effort)
         except FileNotFoundError as e:
             raise HTTPException(400, str(e)) from e        # no active transcript
         except RuntimeError as e:

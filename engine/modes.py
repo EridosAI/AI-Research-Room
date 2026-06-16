@@ -108,17 +108,37 @@ def research(prompt: str, panel: list[str] | None = None, judge: str | None = No
     if not answers:
         raise RuntimeError("every panelist failed — nothing to judge")
 
-    # 4. judge synthesizes (prompt + all answers + rubric)
+    # 4. judge synthesizes (prompt + all answers + rubric). Judge fallback: if the
+    #    configured judge is unavailable (no key / down), fall back to a panelist
+    #    that demonstrably answered this round — a bad judge can't sink a round
+    #    that otherwise succeeded.
     judge_prompt = _build_judge_prompt(prompt, answers, absent)
     judge_payload = {"system": JUDGE_SYSTEM,
                      "messages": [{"role": "user", "content": judge_prompt}]}
-    synthesis = providers.call_model(judge, judge_payload, tools=True, effort=effort)
+    judge_used = judge
+    meta = {"round_id": round_id}
+    try:
+        synthesis = _call_judge(judge, judge_payload, effort)
+    except Exception:  # noqa: BLE001
+        fallbacks = [s for s, _ in answers if s != judge]
+        if not fallbacks:
+            raise
+        judge_used = fallbacks[0]
+        synthesis = _call_judge(judge_used, judge_payload, effort)
+        meta["judge_fallback_from"] = judge
 
     # 5. append synthesis (role=judge, same round_id) and return
+    meta["model"] = providers.provider(judge_used).model
     transcript.append(transcript.make_turn(
-        "research", "judge", judge, synthesis,
-        {"round_id": round_id, "model": providers.provider(judge).model}), path)
+        "research", "judge", judge_used, synthesis, meta), path)
     return synthesis
+
+
+def _call_judge(judge: str, payload: dict, effort: str) -> str:
+    try:
+        return providers.call_model(judge, payload, tools=True, effort=effort)
+    except providers.RunnerUnavailable:
+        return providers.call_model(judge, payload, tools=False)
 
 
 # ---- converse ---------------------------------------------------------------
