@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# room — CLI wrapper: runs `python -m cli.room` from the repo root.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here" && exec python3 -m cli.room "$@"

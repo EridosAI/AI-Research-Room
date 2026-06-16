@@ -1,0 +1,42 @@
+# MACHINE-MANAGED — written by the model-management UI (PUT /providers).
+# Comments are NOT preserved across UI writes; hand edits may be overwritten.
+#
+# Provider registry — NOT secrets. base_urls, models, auth_mode, enabled.
+# API keys live OUTSIDE this file and outside the repo (~/.config/research-room/secrets.json).
+# This registry is user-extensible: the four below are presets, not a hardcoded enum —
+# any OpenAI-compatible endpoint can be added (via the UI in Phase 7, or by hand here).
+
+research_judge = "claude"   # global; Claude is used sparingly but is the judge
+
+[providers.claude]
+auth_mode = "api"                          # api | cli
+backend   = "anthropic"                     # anthropic | openai | cli
+base_url  = "https://api.anthropic.com"     # no /v1; the anthropic adapter posts /v1/messages
+model     = "claude-opus-4-8"
+enabled   = true
+color     = "#d6a667"
+
+[providers.grok]
+auth_mode       = "cli"                      # SuperGrok Heavy subscription; NO key
+backend         = "cli"
+runner          = "run_grok.sh"             # research panelist (agentic web+shell)
+converse_runner = "run_grok_converse.sh"    # one converse turn (single reply)
+model           = "grok-build-0.1"          # empty/default = subscription-safe
+enabled         = true
+color           = "#fca5a5"
+
+[providers.kimi]
+auth_mode = "api"
+backend   = "openai"
+base_url  = "https://api.moonshot.ai/v1"    # note the /v1 in the base
+model     = "kimi-k2.6"
+enabled   = true
+color     = "#c4b5fd"
+
+[providers.deepseek]
+auth_mode = "api"
+backend   = "openai"
+base_url  = "https://api.deepseek.com"      # base has no /v1
+model     = "deepseek-v4-pro"
+enabled   = true
+color     = "#5eead4"

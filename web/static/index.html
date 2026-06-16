@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>research room</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Markdown + sanitization. Model output (incl. Grok's web-searched content)
+       is untrusted: render is ALWAYS marked.parse → DOMPurify.sanitize → insert.
+       If either lib fails to load, app.js fails CLOSED (plain text), never raw HTML. -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="hgroup">
+      <h1>research room</h1>
+      <span id="title" class="title"></span>
+    </div>
+    <div class="controls">
+      <select id="transcripts" title="active transcript"></select>
+      <button id="new-btn">+ new</button>
+      <button id="providers-btn" title="manage providers &amp; models">⚙ providers</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <!-- model-management panel (Phase 7) -->
+  <div id="providers-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <div class="overlay-head">
+        <h2>Providers &amp; models</h2>
+        <button id="providers-close">×</button>
+      </div>
+      <div id="provider-list"></div>
+      <div class="add-row">
+        <h3>+ add provider</h3>
+        <span class="hint">any OpenAI-compatible endpoint (base_url stored verbatim)</span>
+        <div class="add-grid">
+          <input id="add-name" placeholder="name (e.g. openrouter)" />
+          <input id="add-base" placeholder="base_url" />
+          <input id="add-model" placeholder="model (optional)" />
+          <input id="add-key" type="password" placeholder="api key (optional)" />
+          <button id="add-btn">add</button>
+        </div>
+      </div>
+      <div class="judge-row">
+        <label>research judge</label>
+        <select id="judge-select"></select>
+        <span class="hint">synthesizes every research round (a metered call if Claude)</span>
+      </div>
+    </div>
+  </div>
+
+  <main id="stream" class="stream">
+    <div class="empty">No active transcript. Click <b>+ new</b> to start one.</div>
+  </main>
+
+  <footer class="composer">
+    <div class="composer-row">
+      <label class="mode"><input type="radio" name="mode" value="converse" checked /> converse</label>
+      <label class="mode"><input type="radio" name="mode" value="research" /> research</label>
+      <span id="converse-opts">→ <select id="addressee" title="addressed model"></select></span>
+      <span id="research-opts" class="hidden">effort
+        <select id="effort"><option>low</option><option selected>medium</option><option>high</option></select>
+        <span class="hint">all enabled models answer blind, then the judge synthesizes</span>
+      </span>
+    </div>
+    <div class="composer-row">
+      <textarea id="input" rows="3" placeholder="Message the room…  (⌘/Ctrl+Enter to send)"></textarea>
+      <button id="send-btn">send</button>
+    </div>
+    <div id="status" class="status"></div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

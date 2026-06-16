@@ -1,0 +1,23 @@
+# --- secrets: NEVER commit. The real protection is that keys live outside the
+# repo entirely (~/.config/research-room/secrets.json, chmod 600); these are
+# belt-and-suspenders in case a secrets file ever lands in-tree. ---
+secrets.json
+**/secrets.json
+.config/
+
+# --- local engine state ---
+vault/.current
+# transcripts: keep the vault dir (.gitkeep), not the contents. Point
+# RESEARCH_ROOM_VAULT at your own (Obsidian) vault to track transcripts there.
+vault/*.jsonl
+
+# --- python ---
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# --- pre-build scaffolding kept locally for reference, not published ---
+_archive/

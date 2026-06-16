@@ -1,0 +1,44 @@
+# Test-only registry fixture (point RESEARCH_ROOM_CONFIG here). Keeps the real
+# config.toml clean while exercising mock/api/cli paths with zero token cost.
+research_judge = "mock"
+
+[providers.mock]          # deterministic, in-process (no network)
+auth_mode = "api"
+backend   = "mock"
+model     = "mock-1"
+enabled   = true
+color     = "#9aa3b2"
+
+[providers.mock_cli]      # exercises the full CLI path via run_mock.sh
+auth_mode       = "cli"
+backend         = "cli"
+runner          = "run_mock.sh"
+converse_runner = "run_mock.sh"
+model           = "mock-cli-1"
+enabled         = true
+color           = "#a3a3a3"
+
+[providers.mockfail]      # always fails — for degradation tests
+auth_mode       = "cli"
+backend         = "cli"
+runner          = "run_mockfail.sh"
+converse_runner = "run_mockfail.sh"
+model           = "mockfail-1"
+enabled         = true
+color           = "#aa5555"
+
+[providers.deepseek]      # real provider for the live cheap call
+auth_mode = "api"
+backend   = "openai"
+base_url  = "https://api.deepseek.com"
+model     = "deepseek-v4-pro"
+enabled   = true
+color     = "#5eead4"
+
+[providers.claude]        # real provider for the divergent-shape live call
+auth_mode = "api"
+backend   = "anthropic"
+base_url  = "https://api.anthropic.com"
+model     = "claude-opus-4-8"
+enabled   = true
+color     = "#d6a667"
