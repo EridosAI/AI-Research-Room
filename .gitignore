@@ -19,5 +19,12 @@ __pycache__/
 build/
 dist/
 
+# --- python venv ---
+.venv/
+venv/
+
+# --- personal launcher icon: drop your own room.ico for the Desktop shortcut ---
+room.ico
+
 # --- pre-build scaffolding kept locally for reference, not published ---
 _archive/

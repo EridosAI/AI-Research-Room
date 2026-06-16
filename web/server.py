@@ -13,7 +13,12 @@ Run:  python -m web.server   (http://127.0.0.1:8765)
 from __future__ import annotations
 
 import os
+import shutil
+import socket
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -293,11 +298,41 @@ if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+def open_browser(host: str, port: int, timeout: float = 30) -> None:
+    """Open the UI in the default browser once the server is accepting connections.
+    Opt-in (the `--open` flag) so headless/test runs stay browser-free. Polls the
+    port rather than sleeping a fixed time (importing off /mnt/c can be slow)."""
+    url = f"http://{host}:{port}"
+
+    def _open() -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with socket.socket() as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    break
+            time.sleep(0.3)
+        try:
+            if shutil.which("wslview"):
+                subprocess.Popen(["wslview", url])
+            elif shutil.which("explorer.exe"):
+                subprocess.Popen(["explorer.exe", url])   # returns nonzero even on success
+            else:
+                import webbrowser
+                webbrowser.open(url)
+        except Exception as e:  # noqa: BLE001
+            print(f"(auto-open failed: {e}) — open {url} yourself")
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
 def main() -> None:
     import uvicorn
     host = os.environ.get("RESEARCH_ROOM_HOST", "127.0.0.1")   # localhost only
     port = int(os.environ.get("RESEARCH_ROOM_PORT", "8765"))
     print(f"research room → http://{host}:{port}")
+    if "--open" in sys.argv:
+        open_browser(host, port)
     uvicorn.run(app, host=host, port=port)
 
 

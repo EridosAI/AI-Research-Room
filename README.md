@@ -109,6 +109,22 @@ models, toggle a provider to subscription/CLI, choose the judge, and add new pro
 
 (`python -m cli.room <cmd>` works too.)
 
+### One-click launch (Windows + WSL)
+
+`python -m web.server --open` starts the server and opens the UI in your default
+browser once it's accepting connections (opt-in, so headless/test runs stay
+browser-free). For a double-clickable / pinnable launcher:
+
+```bash
+# from the repo root, create a Desktop shortcut (portable — derives its own paths)
+powershell.exe -ExecutionPolicy Bypass -File "$(wslpath -w tools/create_shortcut.ps1)"
+# then right-click "Research Room" on the Desktop → Pin to taskbar
+```
+
+`Room.bat` is the launcher it points at (the console window it opens *is* the
+server — close it to stop). Drop a `room.ico` in the repo root for a custom
+taskbar icon; without one, Windows uses a default.
+
 ---
 
 ## Layout
