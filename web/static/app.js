@@ -19,7 +19,7 @@ function renderMd(el, text) {
 }
 
 // ===== state (no browser storage — the transcript is the single source) ======
-let STATE = { participants: [], turns: [], active: false, title: "", path: "" };
+let STATE = { participants: [], turns: [], active: false, title: "", path: "", judge: "" };
 
 function colorOf(s) {
   const p = STATE.participants.find((x) => x.name === s);
@@ -170,6 +170,13 @@ function pickedPanel() {
   return [...document.querySelectorAll("#panel-pick input:checked")].map((i) => i.value);
 }
 
+function renderJudgePick() {
+  const sel = $("#judge-pick");
+  const enabled = STATE.participants.filter((p) => p.enabled);
+  const def = enabled.some((p) => p.name === STATE.judge) ? STATE.judge : (enabled[0] && enabled[0].name);
+  sel.innerHTML = enabled.map((p) => `<option value="${p.name}"${p.name === def ? " selected" : ""}>${p.name}</option>`).join("");
+}
+
 async function refreshTranscriptList() {
   const { transcripts } = await api("/transcripts");
   const sel = $("#transcripts");
@@ -197,8 +204,9 @@ async function send() {
     if (mode === "research") {
       const panel = pickedPanel();
       if (!panel.length) { banner("select at least one model for the research panel"); $("#send-btn").disabled = false; return; }
-      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} thinking + judge… (can take a while)`, true);
-      data = await api("/research", "POST", { prompt: text, effort: $("#effort").value, panel });
+      const judge = $("#judge-pick").value || null;
+      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} thinking + ${judge || "judge"} synthesizes…`, true);
+      data = await api("/research", "POST", { prompt: text, effort: $("#effort").value, panel, judge });
     } else {
       const addressed_to = $("#addressee").value || null;
       setStatus(`converse: ${addressed_to ? "@" + addressed_to : "(last AI)"} thinking…`, true);
@@ -241,7 +249,8 @@ function lbl(t) { const e = el("label"); e.textContent = t; return e; }
 async function refreshParticipants() {
   const part = await api("/participants");
   STATE.participants = part.participants || [];
-  renderAddressee(); renderPanelPick(); render();
+  STATE.judge = part.research_judge || STATE.judge;
+  renderAddressee(); renderPanelPick(); renderJudgePick(); render();
 }
 
 function providerCard(p) {
@@ -385,7 +394,8 @@ $("#add-btn").addEventListener("click", async () => {
   try {
     const part = await api("/participants");
     STATE.participants = part.participants || [];
-    renderAddressee(); renderPanelPick();
+    STATE.judge = part.research_judge || "";
+    renderAddressee(); renderPanelPick(); renderJudgePick();
     adoptTranscript(await api("/transcript"));
     await refreshTranscriptList();
   } catch (e) { banner(`could not reach engine: ${e.message}`); }

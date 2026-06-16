@@ -37,6 +37,7 @@ class ResearchBody(BaseModel):
     prompt: str
     effort: str = "medium"
     panel: list[str] | None = None   # per-round model selection; None = all enabled
+    judge: str | None = None         # per-round judge override; None = global research_judge
 
 
 class ConverseBody(BaseModel):
@@ -127,9 +128,12 @@ def post_research(body: ResearchBody) -> dict:
             raise HTTPException(400, f"unknown providers: {', '.join(unknown)}")
         if not body.panel:
             raise HTTPException(400, "select at least one model for the research panel")
+    if body.judge is not None and body.judge not in providers.registry():
+        raise HTTPException(400, f"unknown judge: {body.judge}")
     with _lock:
         try:
-            synthesis = modes.research(body.prompt, panel=body.panel, effort=body.effort)
+            synthesis = modes.research(body.prompt, panel=body.panel,
+                                       judge=body.judge, effort=body.effort)
         except FileNotFoundError as e:
             raise HTTPException(400, str(e)) from e        # no active transcript
         except RuntimeError as e:

@@ -53,18 +53,8 @@ def main():
             assert "mock_cli" not in page.locator(".round").inner_text(), "excluded model leaked into the round"
             print("picker OK: only the selected model ran (excluded a model that would have succeeded)")
 
-            # ---- judge fallback: point judge at keyless deepseek ----
-            page.click("#providers-btn")
-            page.wait_for_selector('#judge-select option[value="deepseek"]', state="attached")   # populated (no race)
-            page.select_option("#judge-select", "deepseek")
-            # confirm it persisted before proceeding
-            for _ in range(20):
-                rj = json.loads(urllib.request.urlopen(BASE + "/participants", timeout=5).read())["research_judge"]
-                if rj == "deepseek":
-                    break
-                time.sleep(0.1)
-            assert rj == "deepseek", f"judge change did not persist: {rj}"
-            page.click("#providers-close")
+            # ---- judge fallback: pick keyless deepseek as THIS round's judge ----
+            page.select_option("#judge-pick", "deepseek")
             # run another round with only mock selected
             page.locator('input[name="mode"][value="research"]').check()
             boxes = page.locator("#panel-pick input[type=checkbox]")
