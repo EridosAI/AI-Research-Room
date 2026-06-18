@@ -37,6 +37,21 @@ class Provider:
     base_url: str | None = None      # api providers
     runner: str | None = None        # cli providers: research panelist runner
     converse_runner: str | None = None  # cli providers: converse-turn runner
+    reasoning: bool = False  # opt-in: capture this provider's reasoning (cost/latency)
+    context_window: int = 0  # token window for the fill gauge; 0 = unknown (you set it)
+
+
+@dataclass(frozen=True)
+class ModelReply:
+    """One model turn's result. `reasoning` is best-effort: present only when the
+    provider's reasoning toggle is on AND the backend surfaced it. It is stored on
+    the turn's meta (never in `text`), so it never re-enters forward context.
+    `usage` is {input, output, exact}: exact from an API usage block, else an
+    estimate (cli/mock) — exact=False signals the UI to mark it with a ~."""
+    text: str
+    reasoning: str | None = None
+    reasoning_kind: str | None = None   # "summarized" | "full"
+    usage: dict | None = None
 
 
 # ---- registry load / write-back ---------------------------------------------
@@ -63,14 +78,18 @@ def _load() -> None:
             base_url=(d.get("base_url") or None),
             runner=d.get("runner"),
             converse_runner=d.get("converse_runner"),
+            reasoning=bool(d.get("reasoning", False)),
+            context_window=int(d.get("context_window", 0) or 0),
         )
     _registry = reg
     _research_judge = _raw.get("research_judge", DEFAULT_JUDGE)
 
 
 def _toml_scalar(v) -> str:
-    if isinstance(v, bool):
+    if isinstance(v, bool):          # bool before int (bool is a subclass of int)
         return "true" if v else "false"
+    if isinstance(v, int):           # emit ints unquoted (e.g. context_window)
+        return str(v)
     return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -134,7 +153,8 @@ def research_judge() -> str:
 # ---- mutation (write-back to config.toml) -----------------------------------
 def update_provider(name: str, *, base_url: str | None = None, model: str | None = None,
                     enabled: bool | None = None, auth_mode: str | None = None,
-                    backend: str | None = None, display_name: str | None = None) -> None:
+                    backend: str | None = None, display_name: str | None = None,
+                    reasoning: bool | None = None, context_window: int | None = None) -> None:
     if name not in _raw.get("providers", {}):
         raise ValueError(f"unknown provider '{name}'")
     p = _raw["providers"][name]
@@ -150,6 +170,10 @@ def update_provider(name: str, *, base_url: str | None = None, model: str | None
         p["backend"] = backend
     if display_name is not None:
         p["display_name"] = display_name
+    if reasoning is not None:
+        p["reasoning"] = bool(reasoning)
+    if context_window is not None:
+        p["context_window"] = int(context_window)
     _save()
 
 
@@ -211,6 +235,14 @@ def _mock_text(p: Provider, payload: dict) -> str:
     return f"[mock:{p.key}/{p.model}] {snippet}"
 
 
+def _estimate_usage(payload: dict, text: str) -> dict:
+    """Cheap, tokenizer-agnostic token estimate (~chars/4) for paths with no usage
+    block (cli/mock). Marked exact=False so the UI shows it with a ~."""
+    pin = len(payload.get("system") or "") + sum(
+        len(m.get("content") or "") for m in payload.get("messages", []))
+    return {"input": pin // 4, "output": len(text or "") // 4, "exact": False}
+
+
 def _cli_call(p: Provider, payload: dict, tools: bool, effort: str) -> str:
     """cli path: serialize payload → prompt file → runner → capture. No key.
 
@@ -243,8 +275,13 @@ def _cli_call(p: Provider, payload: dict, tools: bool, effort: str) -> str:
 
 
 def call_model(provider_key: str, payload: dict, tools: bool = False,
-               effort: str = "medium") -> str:
-    """payload = {"system": str, "messages": [{role, content}]} → text.
+               effort: str = "medium") -> ModelReply:
+    """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
+
+    Reasoning capture is best-effort and gated by the provider's `reasoning`
+    toggle: when on, api adapters enable + capture the model's reasoning into
+    ModelReply.reasoning; otherwise it's None. cli/mock contribute none (except
+    the mock honours the toggle so the capture path is testable offline).
 
     Note: tools=True only actually searches on the cli (Grok) path. On the api
     adapters it's currently a no-op (per-provider web-search tools not yet wired),
@@ -252,14 +289,22 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     """
     p = provider(provider_key)
     if p.backend == "mock":
-        return _mock_text(p, payload)
+        text = _mock_text(p, payload)
+        rsn = (f"[mock reasoning · {p.key}] step 1 … step 2 … therefore." if p.reasoning else None)
+        return ModelReply(text, rsn, "full" if rsn else None, _estimate_usage(payload, text))
     if p.auth_mode == "cli":
-        return _cli_call(p, payload, tools, effort)
+        text = _cli_call(p, payload, tools, effort)               # cli surfaces no trace/usage
+        return ModelReply(text, usage=_estimate_usage(payload, text))
     # api
     key = secrets.get(provider_key)
     if p.backend == "anthropic":
-        return anthropic_style.chat(p, key, payload)
-    return openai_style.chat(p, key, payload)
+        text, reasoning, raw = anthropic_style.chat(p, key, payload, reasoning=p.reasoning)
+        kind = "summarized" if reasoning else None
+    else:
+        text, reasoning, raw = openai_style.chat(p, key, payload, reasoning=p.reasoning)
+        kind = "full" if reasoning else None
+    usage = ({**raw, "exact": True} if raw else _estimate_usage(payload, text))
+    return ModelReply(text, reasoning, kind, usage)
 
 
 def list_models(provider_key: str) -> list[str]:

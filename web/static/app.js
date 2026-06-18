@@ -18,15 +18,68 @@ function renderMd(el, text) {
   }
 }
 
-// ===== state (no browser storage — the transcript is the single source) ======
-let STATE = { participants: [], turns: [], active: false, title: "", path: "", judge: "" };
+// ===== state (no browser storage — the server is the single source) ==========
+// STATE.room is the room ON SCREEN (id, title, participants[], judge). STATE.rooms
+// is the sidebar list. Reload reconstructs everything from /ui + /rooms + the
+// active room — nothing is read from localStorage.
+let STATE = {
+  participants: [],          // global registry (colours, addressee)
+  globalJudge: "",
+  room: null,                // active room or null
+  turns: [],
+  rooms: [],                 // sidebar list
+  ui: { sidebar_collapsed: false, sidebar_width: 260 },
+  marginTurns: [],           // active room's margin.jsonl
+  marginOpen: false,
+};
+
+// ===== accent engine (one hue, five derived) ================================
+// Compose oklch(L C H) per role at FIXED lightness/chroma — only the hue varies,
+// so any hue recolours every interactive/selected state coherently. The browser
+// does oklch→screen; no colour math, no lib, no build step.
+function applyAccent(hue) {
+  const h = Number(hue);
+  if (Number.isNaN(h)) return;
+  const r = document.documentElement.style;
+  r.setProperty("--accent",        `oklch(0.55 0.15 ${h})`);
+  r.setProperty("--accent-hover",  `oklch(0.60 0.15 ${h})`);
+  r.setProperty("--accent-active", `oklch(0.50 0.15 ${h})`);
+  r.setProperty("--accent-text",   `oklch(0.72 0.15 ${h})`);
+  r.setProperty("--accent-subtle", `oklch(0.55 0.15 ${h} / 0.16)`);
+  r.setProperty("--accent-border", `oklch(0.55 0.15 ${h} / 0.36)`);
+}
+
+// Text brightness — derive the whole grey ramp from ONE top-lightness (same
+// discipline as the accent), so a future light theme slots its own ramp into the
+// same machinery instead of fighting hand-set values. Lower = calmer on dark.
+const BRIGHTNESS_TOP = { soft: 0.82, default: 0.90, crisp: 0.97 };
+const RAMP_STEPS = [1.0, 0.856, 0.649, 0.495];   // primary→quaternary proportions
+const TEXT_VARS = ["--text-primary", "--text-secondary", "--text-tertiary", "--text-quaternary"];
+function applyBrightness(level) {
+  const top = BRIGHTNESS_TOP[level] ?? BRIGHTNESS_TOP.default;
+  const r = document.documentElement.style;
+  TEXT_VARS.forEach((n, i) => r.setProperty(n, `oklch(${(top * RAMP_STEPS[i]).toFixed(3)} 0.012 256)`));
+}
+
+// Font size — one multiplier the 12–35px ramp is expressed against.
+const FONT_SCALE = { compact: 0.92, default: 1.0, large: 1.12 };
+function applyFontScale(level) {
+  document.documentElement.style.setProperty("--font-scale", String(FONT_SCALE[level] ?? 1));
+}
+
+// How the app addresses you — replaces the "human" label in the UI (and [human]
+// in build_context, server-side). Still the human role under the hood.
+function displayName() { return (STATE.ui.display_name || "").trim() || "human"; }
+
+// Speaker-dot identity colours — a small map kept OUTSIDE the token/accent system
+// (semantic identity, not theme). Provider dots come from each provider's config.
+const DOT_MAP = { human: "#6ee7b7", judge: "#f0abfc" };
+const DOT_DEFAULT = "#9aa3b2";
 
 function colorOf(s) {
   const p = STATE.participants.find((x) => x.name === s);
   if (p) return p.color;
-  if (s === "human") return "#6ee7b7";
-  if (s === "judge") return "#f0abfc";
-  return "#9aa3b2";
+  return DOT_MAP[s] || DOT_DEFAULT;
 }
 function dot(color) {
   const d = document.createElement("span");
@@ -37,10 +90,12 @@ function whoLine(speaker, color, extra) {
   d.appendChild(dot(color));
   const nm = document.createElement("span"); nm.style.color = color; nm.textContent = speaker;
   d.appendChild(nm);
-  if (extra) { const e = document.createElement("span"); e.style.color = "var(--muted)"; e.textContent = " · " + extra; d.appendChild(e); }
+  if (extra) { const e = document.createElement("span"); e.style.color = "var(--text-tertiary)"; e.textContent = " · " + extra; d.appendChild(e); }
   return d;
 }
 function $(s) { return document.querySelector(s); }
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+function lbl(t) { const e = el("label"); e.textContent = t; return e; }
 
 function banner(msg) {
   const b = $("#banner");
@@ -65,7 +120,7 @@ async function api(path, method, body) {
   return data;
 }
 
-// ===== rendering =============================================================
+// ===== transcript rendering (unchanged shape) ================================
 function groupTurns(turns) {
   const blocks = []; let round = null;
   for (const t of turns) {
@@ -85,20 +140,78 @@ function groupTurns(turns) {
 function renderConverse(t) {
   const div = document.createElement("div");
   div.className = "turn" + (t.role === "human" ? " human" : "");
-  const who = t.role === "human" ? "human" : t.speaker;
-  div.appendChild(whoLine(who, colorOf(who), (t.meta && t.meta.model) || ""));
+  const isHuman = t.role === "human";
+  const fromMargin = t.meta && t.meta.from_margin;
+  const extra = (fromMargin ? "from margin" : "") || (t.meta && t.meta.model) || "";
+  // label uses the display name for human turns; dot colour stays keyed on "human"
+  div.appendChild(whoLine(isHuman ? displayName() : t.speaker, colorOf(isHuman ? "human" : t.speaker), extra));
   const body = document.createElement("div"); body.className = "body";
   renderMd(body, t.text); div.appendChild(body);
+  const rb = reasoningBlock(t); if (rb) div.appendChild(rb);
+  const ac = artifactControls(t); if (ac) div.appendChild(ac);
   return div;
 }
 
 function plainPreview(text, n = 160) { return (text || "").replace(/\s+/g, " ").trim().slice(0, n); }
 
+// A collapsed (auto-minimised) "thinking" disclosure for any turn whose meta
+// carries reasoning. Visible only to you — reasoning lives in meta, never in text,
+// so it never flows to another model. Sanitised like all model output.
+function reasoningBlock(t) {
+  const r = t.meta && t.meta.reasoning;
+  if (!r) return null;
+  const summarized = t.meta.reasoning_kind === "summarized";
+  const wrap = el("div", "reasoning");
+  const btn = el("button", "reasoning-toggle");
+  btn.textContent = summarized ? "▸ thinking (summary)" : "▸ thinking";
+  const body = el("div", "reasoning-body hidden"); renderMd(body, r);
+  btn.addEventListener("click", () => {
+    const show = body.classList.contains("hidden");
+    body.classList.toggle("hidden", !show);
+    btn.textContent = (show ? "▾ " : "▸ ") + (summarized ? "thinking (summary)" : "thinking");
+  });
+  wrap.append(btn, body);
+  return wrap;
+}
+
+// Markdown artifact detection — ONE rule: a fenced ```markdown block. On a match,
+// show copy (raw .md → clipboard) + save (→ artifacts dir, server-side) controls.
+function extractMdBlocks(text) {
+  const re = /```markdown[ \t]*\r?\n([\s\S]*?)```/gi;
+  const out = []; let m;
+  while ((m = re.exec(text || ""))) { const c = m[1].trim(); if (c) out.push(c); }
+  return out;
+}
+function artifactControls(t) {
+  const blocks = extractMdBlocks(t.text);
+  if (!blocks.length) return null;
+  const wrap = el("div", "artifacts");
+  blocks.forEach((content, i) => {
+    const row = el("div", "artifact");
+    const lab = el("span", "artifact-label");
+    lab.textContent = `📄 markdown artifact${blocks.length > 1 ? " " + (i + 1) : ""}`;
+    const copy = el("button", "artifact-btn"); copy.textContent = "copy";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(content); copy.textContent = "copied ✓";
+            setTimeout(() => (copy.textContent = "copy"), 1200); }
+      catch (e) { banner("copy failed: " + e.message); }
+    });
+    const save = el("button", "artifact-btn"); save.textContent = "save";
+    save.addEventListener("click", async () => {
+      if (!STATE.room) return;
+      try { const r = await api(`/rooms/${STATE.room.id}/artifact`, "POST", { content }); banner(`Saved ${r.path}`); }
+      catch (e) { banner(e.message); }
+    });
+    row.append(lab, copy, save); wrap.append(row);
+  });
+  return wrap;
+}
+
 function renderRound(b) {
   const div = document.createElement("div"); div.className = "round";
   if (b.prompt) {
     const pr = document.createElement("div"); pr.className = "prompt";
-    pr.appendChild(whoLine("human", colorOf("human"), "research"));
+    pr.appendChild(whoLine(displayName(), colorOf("human"), "research"));
     const body = document.createElement("div"); body.className = "body"; renderMd(body, b.prompt.text);
     pr.appendChild(body); div.appendChild(pr);
   }
@@ -123,6 +236,7 @@ function renderRound(b) {
         btn.textContent = showing ? "collapse" : "view full";
       });
       card.appendChild(btn);
+      const rb = reasoningBlock(p); if (rb) card.appendChild(rb);
       grid.appendChild(card);
     }
     div.appendChild(grid);
@@ -134,35 +248,54 @@ function renderRound(b) {
     const extra = `synthesis · ${n} panelist${n === 1 ? "" : "s"}` + (ff ? ` · judge fell back from ${ff}` : "");
     syn.appendChild(whoLine(b.judge.speaker, colorOf(b.judge.speaker), extra));
     const body = document.createElement("div"); renderMd(body, b.judge.text); syn.appendChild(body);
+    const rb = reasoningBlock(b.judge); if (rb) syn.appendChild(rb);
+    const ac = artifactControls(b.judge); if (ac) syn.appendChild(ac);
     div.appendChild(syn);
   }
   return div;
 }
 
 function render() {
-  $("#title").textContent = STATE.active ? STATE.title : "";
+  $("#title").textContent = STATE.room ? STATE.room.title : "";
+  $("#room-settings-btn").disabled = !STATE.room;
+  $("#margin-toggle").disabled = !STATE.room;
+  renderTokenBar();
   const main = $("#stream"); main.innerHTML = "";
-  if (!STATE.active) { main.innerHTML = '<div class="empty">No active transcript. Click <b>+ new</b> to start one.</div>'; return; }
-  if (!STATE.turns.length) main.innerHTML = '<div class="empty">Empty room — send the first message.</div>';
+  if (!STATE.room) {
+    main.innerHTML = '<div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>';
+    return;
+  }
+  if (!STATE.turns.length) {
+    const roster = (STATE.room.participants || []).length;
+    main.innerHTML = roster
+      ? '<div class="empty">Empty room — send the first message.</div>'
+      : '<div class="empty">Empty room. Pick this room\'s models with <b>models</b> (top-right) to begin.</div>';
+    return;
+  }
   for (const b of groupTurns(STATE.turns)) main.appendChild(b.type === "round" ? renderRound(b) : renderConverse(b.turn));
   main.scrollTop = main.scrollHeight;
 }
 
+// ===== composer pickers (scoped to the ACTIVE ROOM's roster) =================
+function roomRoster() { return (STATE.room && STATE.room.participants) || []; }
+function providerOf(key) { return STATE.participants.find((p) => p.name === key); }
+
 function renderAddressee() {
   const sel = $("#addressee");
-  sel.innerHTML = '<option value="">auto (last AI)</option>' +
-    STATE.participants.filter((p) => p.enabled).map((p) => `<option value="${p.name}">@${p.name}</option>`).join("");
+  const opts = roomRoster().map((k) => `<option value="${k}">@${k}</option>`).join("");
+  sel.innerHTML = '<option value="">auto (last AI)</option>' + opts;
 }
 
 function renderPanelPick() {
   const box = $("#panel-pick"); box.innerHTML = "";
-  const enabled = STATE.participants.filter((p) => p.enabled);
-  if (!enabled.length) return;
+  const roster = roomRoster();
+  if (!roster.length) { box.append(document.createTextNode("· no models in this room — set them in “models”")); return; }
   box.append(document.createTextNode("· panel:"));
-  for (const p of enabled) {
+  for (const k of roster) {
+    const p = providerOf(k);
     const lab = el("label", "pickitem");
-    const cb = el("input"); cb.type = "checkbox"; cb.value = p.name; cb.checked = true;
-    lab.append(cb, dot(p.color), document.createTextNode(p.name));
+    const cb = el("input"); cb.type = "checkbox"; cb.value = k; cb.checked = true;
+    lab.append(cb, dot(p ? p.color : DOT_DEFAULT), document.createTextNode(k));
     box.append(lab);
   }
 }
@@ -172,22 +305,185 @@ function pickedPanel() {
 
 function renderJudgePick() {
   const sel = $("#judge-pick");
-  const enabled = STATE.participants.filter((p) => p.enabled);
-  const def = enabled.some((p) => p.name === STATE.judge) ? STATE.judge : (enabled[0] && enabled[0].name);
-  sel.innerHTML = enabled.map((p) => `<option value="${p.name}"${p.name === def ? " selected" : ""}>${p.name}</option>`).join("");
+  const roster = roomRoster();
+  const judge = STATE.room && STATE.room.judge;
+  // Forced decision: if the room has no judge, show a disabled "select…" so a
+  // research round can't be fired without one.
+  let html = "";
+  if (!judge) html += `<option value="" disabled selected>select…</option>`;
+  html += roster.map((k) => `<option value="${k}"${k === judge ? " selected" : ""}>${k}</option>`).join("");
+  sel.innerHTML = html || `<option value="" disabled selected>select…</option>`;
 }
 
-async function refreshTranscriptList() {
-  const { transcripts } = await api("/transcripts");
-  const sel = $("#transcripts");
-  if (!transcripts.length) { sel.innerHTML = "<option>— no transcripts —</option>"; return; }
-  sel.innerHTML = transcripts.map((t) => `<option value="${t.path}"${t.path === STATE.path ? " selected" : ""}>${t.title}</option>`).join("");
+function renderComposerPickers() { renderAddressee(); renderPanelPick(); renderJudgePick(); }
+
+// ===== token / context indicator =============================================
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1000) return Math.round(n / 1000) + "k";
+  return "" + n;
+}
+// pre-send fill estimate: the synthesis-only forward view, ~chars/4 — same method
+// for every provider, so it's a fill gauge, not a billing figure (hence the ~).
+function estimateContextTokens() {
+  let chars = 0;
+  for (const t of STATE.turns) if (!(t.meta && t.meta.is_panelist_raw)) chars += (t.text || "").length;
+  return Math.round(chars / 4);
+}
+// per-model spend share over the room's stored usage (Grok estimate-only → ~).
+function modelPercents() {
+  const per = {}; let total = 0, approx = false;
+  for (const t of STATE.turns) {
+    const u = t.meta && t.meta.usage;
+    if (!u || t.role === "human") continue;        // model turns only carry usage
+    const tok = (u.input || 0) + (u.output || 0);
+    per[t.speaker] = (per[t.speaker] || 0) + tok; total += tok;
+    if (!u.exact) approx = true;
+  }
+  return { per, total, approx };
+}
+function renderTokenBar() {
+  const bar = $("#token-bar"); if (!bar) return;
+  bar.innerHTML = "";
+  if (!STATE.room || !roomRoster().length) return;
+  const showTok = STATE.ui.show_token_estimate !== false;   // default on
+  const showPct = !!STATE.ui.show_model_pct;                 // default off
+  const fill = estimateContextTokens();
+  const { per, total, approx } = modelPercents();
+  for (const k of roomRoster()) {
+    const p = providerOf(k);
+    const win = p && p.context_window ? p.context_window : 0;
+    const chip = el("span", "tchip");
+    chip.append(dot(p ? p.color : DOT_DEFAULT));
+    let txt = k;
+    if (showTok) txt += ` ~${fmtTokens(fill)}${win ? " / " + fmtTokens(win) : ""}`;
+    if (showPct) txt += ` ${approx ? "~" : ""}${total ? Math.round((per[k] || 0) / total * 100) : 0}%`;
+    const s = el("span"); s.textContent = txt; chip.append(s); bar.append(chip);
+  }
+  // session total: real usage where the API gave it, estimate otherwise (~).
+  let tot = 0, approx2 = false, any = false;
+  for (const t of STATE.turns) {
+    const u = t.meta && t.meta.usage;
+    if (!u) continue;
+    any = true; tot += (u.input || 0) + (u.output || 0);
+    if (!u.exact) approx2 = true;
+  }
+  if (any) {
+    const s = el("span", "tchip total");
+    s.textContent = `session ${approx2 ? "~" : ""}${fmtTokens(tot)} tok`;
+    bar.append(s);
+  }
 }
 
-function adoptTranscript(tr) {
-  STATE.active = tr.active;
-  STATE.title = tr.title || ""; STATE.path = tr.path || ""; STATE.turns = tr.turns || [];
+// ===== sidebar ===============================================================
+function applyUI() {
+  const sb = $("#sidebar");
+  sb.style.width = (STATE.ui.sidebar_width || 260) + "px";
+  sb.classList.toggle("collapsed", !!STATE.ui.sidebar_collapsed);
+  $("#sidebar-expand").classList.toggle("hidden", !STATE.ui.sidebar_collapsed);
+}
+
+function renderSidebar() {
+  const list = $("#room-list"); list.innerHTML = "";
+  if (!STATE.rooms.length) {
+    const e = el("div", "sidebar-empty");
+    e.innerHTML = "No rooms yet.<br />Create your first room to begin.";
+    list.append(e);
+    return;
+  }
+  for (const r of STATE.rooms) {
+    const row = el("div", "room-row" + (STATE.room && r.id === STATE.room.id ? " active" : ""));
+    if (r.unread && !(STATE.room && r.id === STATE.room.id)) row.append(el("span", "unread-dot"));
+    const t = el("span", "rtitle"); t.textContent = r.title || r.id; row.append(t);
+    if (r.turn_count) { const m = el("span", "rmeta"); m.textContent = r.turn_count; row.append(m); }
+    row.addEventListener("click", () => switchRoom(r.id));
+    row.addEventListener("mouseenter", () => schedulePreview(r, row));
+    row.addEventListener("mouseleave", hidePreview);
+    list.append(row);
+  }
+}
+
+// ===== room hover preview (cheap, no model call) =============================
+let _previewTimer = null;
+function fmtDate(ts) {
+  if (!ts) return "?";
+  const d = new Date(ts);
+  return isNaN(d) ? "?" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+function schedulePreview(room, rowEl) {
+  clearTimeout(_previewTimer);
+  _previewTimer = setTimeout(() => showPreview(room, rowEl.getBoundingClientRect()), 250);  // debounce pass-through
+}
+function hidePreview() {
+  clearTimeout(_previewTimer);
+  $("#room-preview").classList.add("hidden");
+}
+function showPreview(room, rect) {
+  const pop = $("#room-preview"); pop.innerHTML = "";
+  const title = el("div", "rp-title"); title.textContent = room.title || room.id; pop.append(title);
+  const models = el("div", "rp-models");
+  (room.participants || []).forEach((k) => {
+    const p = providerOf(k); models.append(dot(p ? p.color : DOT_DEFAULT));
+    const s = el("span"); s.textContent = k; s.style.marginRight = "8px"; models.append(s);
+  });
+  if (!(room.participants || []).length) { const s = el("span"); s.textContent = "no models yet"; models.append(s); }
+  pop.append(models);
+  const dates = el("div", "rp-dates");
+  dates.textContent = `started ${fmtDate(room.created)} · last ${fmtDate(room.last_ts)} · ${room.turn_count || 0} turns`;
+  pop.append(dates);
+  if (room.preview) { const sum = el("div", "rp-summary"); sum.textContent = room.preview; pop.append(sum); }  // textContent = no HTML injection
+  pop.classList.remove("hidden");
+  // position to the right of the row, clamped to the viewport
+  const top = Math.min(rect.top, window.innerHeight - pop.offsetHeight - 12);
+  pop.style.top = Math.max(8, top) + "px";
+  pop.style.left = (rect.right + 8) + "px";
+}
+
+async function refreshRooms() {
+  const data = await api("/rooms");
+  STATE.rooms = data.rooms || [];
+  renderSidebar();
+}
+
+// ===== adopt / switch / new ==================================================
+function adoptRoom(view) {
+  STATE.room = {
+    id: view.id, title: view.title,
+    participants: view.participants || [], judge: view.judge || null,
+    margin_model: view.margin_model || null,
+    splitter_width: view.splitter_width || null,
+    tags: view.tags || [],
+  };
+  STATE.turns = view.turns || [];
+  if (view.margin_turns !== undefined) STATE.marginTurns = view.margin_turns || [];
+  renderComposerPickers();
   render();
+  renderMargin();                       // show THIS room's own margin
+  if (STATE.marginOpen) applyMarginWidth();
+}
+
+async function markRead(id, count) {
+  try { await api(`/rooms/${id}`, "PUT", { last_read_pos: count }); } catch (e) { /* non-fatal */ }
+}
+
+async function switchRoom(id) {
+  banner(null); setStatus("");   // a background round's status must not bleed across rooms
+  try {
+    const view = await api(`/rooms/${id}/activate`, "POST");   // sets active + marks read
+    adoptRoom(view);
+    await refreshRooms();
+  } catch (e) { banner(e.message); }
+}
+
+async function newRoom() {
+  const title = prompt("room title:");
+  if (!title) return;
+  try {
+    const data = await api("/rooms", "POST", { title });   // EMPTY room — forced decision
+    adoptRoom(data.room);
+    await refreshRooms();
+    banner("New room — choose its models and judge in “models” (top-right) before researching.");
+  } catch (e) { banner(e.message); }
 }
 
 // ===== compose ===============================================================
@@ -196,29 +492,42 @@ function currentMode() { return document.querySelector('input[name="mode"]:check
 async function send() {
   const input = $("#input"); const text = input.value.trim();
   if (!text) return;
-  if (!STATE.active) { banner("Create a transcript first (+ new)."); return; }
+  if (!STATE.room) { banner("Create a room first (+ new room)."); return; }
   const mode = currentMode();
-  $("#send-btn").disabled = true; banner(null);
+  const roomId = STATE.room.id;            // the room this message belongs to
+  banner(null);
+  // Note: the send button is deliberately NOT globally disabled. A round may be
+  // in flight in room A while the user switches to B and sends there; each send
+  // captures its own roomId and the server serializes per-room. Disabling here
+  // would defeat multi-room concurrency.
   try {
     let data;
     if (mode === "research") {
       const panel = pickedPanel();
-      if (!panel.length) { banner("select at least one model for the research panel"); $("#send-btn").disabled = false; return; }
-      const judge = $("#judge-pick").value || null;
-      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} thinking + ${judge || "judge"} synthesizes…`, true);
-      data = await api("/research", "POST", { prompt: text, effort: $("#effort").value, panel, judge });
+      if (!panel.length) { banner("select at least one model for the research panel (or set the room's models)"); return; }
+      const judge = $("#judge-pick").value;
+      if (!judge) { banner("select a judge for this round (or set one in “models”)"); return; }
+      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} working + ${judge} synthesizes…`, true);
+      data = await api(`/rooms/${roomId}/research`, "POST", { prompt: text, effort: $("#effort").value, panel, judge });
     } else {
       const addressed_to = $("#addressee").value || null;
-      setStatus(`converse: ${addressed_to ? "@" + addressed_to : "(last AI)"} thinking…`, true);
-      data = await api("/converse", "POST", { prompt: text, addressed_to });
+      setStatus(`converse: ${addressed_to ? "@" + addressed_to : "(last AI)"} responding…`, true);
+      data = await api(`/rooms/${roomId}/converse`, "POST", { prompt: text, addressed_to });
     }
     input.value = "";
-    adoptTranscript(data.transcript);   // pure view: re-render from returned turns
-    setStatus("");
+    // Concurrency: render the result ONLY if its room is still on screen. If the
+    // user switched away while it ran, leave the active view alone and let the
+    // sidebar dot surface the background completion.
+    if (STATE.room && STATE.room.id === data.room_id) {
+      adoptRoom(data.transcript);
+      await markRead(roomId, data.transcript.turn_count);
+    }
+    await refreshRooms();
+    // Only clear the status line if it's still describing THIS (now-finished)
+    // send and the user hasn't moved on to another room's activity.
+    if (STATE.room && STATE.room.id === data.room_id) setStatus("");
   } catch (e) {
     setStatus(""); banner(`${mode} failed: ${e.message}`);
-  } finally {
-    $("#send-btn").disabled = false;
   }
 }
 
@@ -228,29 +537,195 @@ function syncModeUI() {
   $("#converse-opts").classList.toggle("hidden", research);
 }
 
+// ===== room settings (per-room roster + judge) ===============================
+function openRoomSettings() {
+  if (!STATE.room) return;
+  const roster = $("#room-roster"); roster.innerHTML = "";
+  const inRoom = new Set(STATE.room.participants || []);
+  for (const p of STATE.participants) {
+    const lab = el("label", "pickitem");
+    const cb = el("input"); cb.type = "checkbox"; cb.value = p.name; cb.checked = inRoom.has(p.name);
+    cb.addEventListener("change", fillRoomJudge);
+    lab.append(cb, dot(p.color), document.createTextNode(p.name));
+    roster.append(lab);
+  }
+  fillRoomJudge();
+  $("#room-tags").value = (STATE.room.tags || []).join(", ");
+  $("#room-settings-overlay").classList.remove("hidden");
+}
+function checkedRoster() {
+  return [...document.querySelectorAll("#room-roster input:checked")].map((i) => i.value);
+}
+function fillRoomJudge() {
+  const sel = $("#room-judge");
+  const roster = checkedRoster();
+  const cur = STATE.room && STATE.room.judge;
+  let html = `<option value="" disabled${cur && roster.includes(cur) ? "" : " selected"}>select…</option>`;
+  html += roster.map((k) => `<option value="${k}"${k === cur ? " selected" : ""}>${k}</option>`).join("");
+  sel.innerHTML = html;
+}
+async function saveRoomSettings() {
+  const participants = checkedRoster();
+  const judge = $("#room-judge").value || null;
+  const tags = $("#room-tags").value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    await api(`/rooms/${STATE.room.id}`, "PUT", { participants, judge, tags });
+    STATE.room.participants = participants; STATE.room.judge = judge; STATE.room.tags = tags;
+    renderComposerPickers(); render();
+    $("#room-settings-overlay").classList.add("hidden");
+    banner(null);
+  } catch (e) { banner(e.message); }
+}
+
+// ===== margin (in-room side-channel) =========================================
+function marginStatus(msg, busy) {
+  const s = $("#margin-status"); s.innerHTML = ""; s.classList.toggle("busy", !!busy);
+  if (busy) { const sp = el("span", "spinner"); s.appendChild(sp); }
+  if (msg) s.appendChild(document.createTextNode(msg));
+}
+
+function renderMarginModel() {
+  const sel = $("#margin-model");
+  const cur = STATE.room && STATE.room.margin_model;
+  let html = `<option value="" disabled${cur ? "" : " selected"}>model…</option>`;
+  html += STATE.participants.map((p) => `<option value="${p.name}"${p.name === cur ? " selected" : ""}>${p.name}</option>`).join("");
+  sel.innerHTML = html;
+}
+
+function renderMargin() {
+  renderMarginModel();
+  const box = $("#margin-stream"); box.innerHTML = "";
+  if (!STATE.marginTurns.length) {
+    box.innerHTML = '<div class="empty">Ask a side-question — it sees the main chat as background but never touches it.</div>';
+    return;
+  }
+  for (const t of STATE.marginTurns) {
+    const isQ = t.role === "human";
+    const div = el("div", "margin-turn " + (isQ ? "q" : "a"));
+    div.appendChild(whoLine(isQ ? "you" : t.speaker, colorOf(isQ ? "human" : t.speaker)));
+    const body = el("div", "body"); renderMd(body, t.text); div.appendChild(body);
+    if (!isQ) {
+      const btn = el("button", "promote-btn"); btn.textContent = "copy to main";
+      btn.title = "append this answer to the main thread (the one way margin → main)";
+      btn.addEventListener("click", () => promoteMargin(t.id));
+      div.appendChild(btn);
+    }
+    box.appendChild(div);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function applyMarginWidth() {
+  const w = STATE.room && STATE.room.splitter_width;
+  if (w) $("#margin").style.width = w + "px";
+}
+
+function openMargin() {
+  if (!STATE.room) return;
+  STATE.marginOpen = true;
+  $("#margin").classList.remove("hidden");
+  $("#margin-splitter").classList.remove("hidden");
+  applyMarginWidth(); renderMargin();
+}
+function closeMargin() {
+  STATE.marginOpen = false;
+  $("#margin").classList.add("hidden");
+  $("#margin-splitter").classList.add("hidden");
+}
+
+async function marginSend() {
+  if (!STATE.room) return;
+  const input = $("#margin-input"); const text = input.value.trim();
+  if (!text) return;
+  const model = $("#margin-model").value;
+  if (!model) { marginStatus("pick a margin model first."); return; }
+  const window_ = $("#margin-window").value;
+  const roomId = STATE.room.id;
+  marginStatus(`${model} responding…`, true);
+  try {
+    const data = await api(`/rooms/${roomId}/margin`, "POST", { prompt: text, window: window_, model });
+    input.value = "";
+    // Concurrency: only paint into the margin if we're still in that room.
+    if (STATE.room && STATE.room.id === data.room_id) {
+      STATE.marginTurns = data.margin_turns || [];
+      renderMargin(); marginStatus("");
+    }
+  } catch (e) { marginStatus(`margin failed: ${e.message}`); }
+}
+
+async function promoteMargin(turnId) {
+  try {
+    const data = await api(`/rooms/${STATE.room.id}/margin/${turnId}/promote`, "POST");
+    if (STATE.room && STATE.room.id === data.room_id) adoptRoom(data.transcript);  // note now in main
+    banner("Copied to main.");
+  } catch (e) { banner(e.message); }
+}
+
 // ===== wiring ================================================================
 $("#send-btn").addEventListener("click", send);
-$("#input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } });
+$("#margin-toggle").addEventListener("click", () => (STATE.marginOpen ? closeMargin() : openMargin()));
+$("#margin-close").addEventListener("click", closeMargin);
+$("#margin-send").addEventListener("click", marginSend);
+$("#margin-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); marginSend(); }
+});
+$("#margin-model").addEventListener("change", async (e) => {
+  const v = e.target.value; if (!v || !STATE.room) return;
+  STATE.room.margin_model = v;
+  try { await api(`/rooms/${STATE.room.id}`, "PUT", { margin_model: v }); } catch (err) { /* non-fatal */ }
+});
+(function wireMarginSplitter() {
+  const rez = $("#margin-splitter"); let dragging = false;
+  rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const w = Math.max(240, Math.min(640, window.innerWidth - e.clientX));
+    if (STATE.room) STATE.room.splitter_width = w;
+    $("#margin").style.width = w + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return; dragging = false;
+    if (STATE.room) api(`/rooms/${STATE.room.id}`, "PUT", { splitter_width: STATE.room.splitter_width }).catch(() => {});
+  });
+})();
+$("#input").addEventListener("keydown", (e) => {
+  // Enter sends; Shift+Enter inserts a newline. isComposing guard: don't swallow
+  // an IME candidate-commit (also pressed via Enter) as a send.
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
 document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", syncModeUI));
-$("#new-btn").addEventListener("click", async () => {
-  const title = prompt("transcript title:"); if (!title) return;
-  try { adoptTranscript(await api("/transcript", "POST", { title })); await refreshTranscriptList(); banner(null); }
-  catch (e) { banner(e.message); }
-});
-$("#transcripts").addEventListener("change", async (e) => {
-  try { adoptTranscript(await api("/transcript/select", "POST", { path: e.target.value })); banner(null); }
-  catch (err) { banner(err.message); }
-});
+$("#new-room-btn").addEventListener("click", newRoom);
+$("#room-settings-btn").addEventListener("click", openRoomSettings);
+$("#room-settings-close").addEventListener("click", () => $("#room-settings-overlay").classList.add("hidden"));
+$("#room-settings-save").addEventListener("click", saveRoomSettings);
 
-// ===== model-management panel (Phase 7) =====================================
-function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
-function lbl(t) { const e = el("label"); e.textContent = t; return e; }
+// sidebar collapse + resize (state lives server-side in ui.json)
+async function setUI(patch) {
+  STATE.ui = { ...STATE.ui, ...patch }; applyUI();
+  try { await api("/ui", "PUT", patch); } catch (e) { /* non-fatal */ }
+}
+$("#sidebar-collapse").addEventListener("click", () => setUI({ sidebar_collapsed: true }));
+$("#sidebar-expand").addEventListener("click", () => setUI({ sidebar_collapsed: false }));
+(function wireResizer() {
+  const rez = $("#sidebar-resizer"); let dragging = false;
+  rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const w = Math.max(180, Math.min(480, e.clientX));
+    STATE.ui.sidebar_width = w; $("#sidebar").style.width = w + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return; dragging = false;
+    api("/ui", "PUT", { sidebar_width: STATE.ui.sidebar_width }).catch(() => {});
+  });
+})();
 
+// ===== model-management panel (Phase 7; unchanged behaviour) =================
 async function refreshParticipants() {
   const part = await api("/participants");
   STATE.participants = part.participants || [];
-  STATE.judge = part.research_judge || STATE.judge;
-  renderAddressee(); renderPanelPick(); renderJudgePick(); render();
+  STATE.globalJudge = part.research_judge || STATE.globalJudge;
+  renderComposerPickers(); render();
 }
 
 function providerCard(p) {
@@ -267,11 +742,10 @@ function providerCard(p) {
   const grid = el("div", "pgrid"); card.append(grid);
   const actions = el("div", "pcard-actions"); card.append(actions);
   const dl = el("datalist"); dl.id = "dl-" + p.name;
-  let baseInput, modelInput, keyInput, enabledInput;
+  let baseInput, modelInput, keyInput, enabledInput, reasoningInput, ctxInput;
 
   function buildGrid() {
     grid.innerHTML = "";
-    // mode toggle — checking it makes the row structurally keyless (cli)
     grid.append(lbl("mode"));
     const cb = el("input"); cb.type = "checkbox"; cb.checked = localAuth === "cli"; cb.id = "cli-" + p.name;
     const cbl = el("label", "authtoggle"); cbl.append(cb, document.createTextNode(" use CLI subscription (no key)"));
@@ -305,6 +779,17 @@ function providerCard(p) {
     grid.append(lbl("enabled"));
     enabledInput = el("input"); enabledInput.type = "checkbox"; enabledInput.checked = p.enabled;
     const ecell = el("div"); ecell.append(enabledInput); grid.append(ecell);
+
+    grid.append(lbl("reasoning"));
+    reasoningInput = el("input"); reasoningInput.type = "checkbox"; reasoningInput.checked = !!p.reasoning;
+    const rl = el("label", "authtoggle");
+    rl.append(reasoningInput, document.createTextNode(" show reasoning (best-effort; may add cost)"));
+    const rcell = el("div"); rcell.append(rl); grid.append(rcell);
+
+    grid.append(lbl("context window"));
+    ctxInput = el("input"); ctxInput.type = "number"; ctxInput.min = "0";
+    ctxInput.value = p.context_window || ""; ctxInput.placeholder = "tokens (for the fill gauge)";
+    const ccell = el("div"); ccell.append(ctxInput); grid.append(ccell);
   }
 
   function buildActions() {
@@ -341,7 +826,9 @@ function providerCard(p) {
     const right = el("span", "right");
     const save = el("button"); save.textContent = "save";
     save.addEventListener("click", async () => {
-      const body = { enabled: enabledInput.checked, auth_mode: localAuth, model: modelInput.value.trim() };
+      const body = { enabled: enabledInput.checked, auth_mode: localAuth,
+                     model: modelInput.value.trim(), reasoning: reasoningInput.checked,
+                     context_window: parseInt(ctxInput.value, 10) || 0 };
       if (localAuth === "api") {
         body.base_url = baseInput.value.trim();
         if (keyInput && keyInput.value) body.api_key = keyInput.value;   // ONLY a typed value is a new key
@@ -368,10 +855,122 @@ async function openProviders() {
   data.providers.forEach((p) => list.append(providerCard(p)));
   $("#judge-select").innerHTML = data.providers
     .map((p) => `<option value="${p.name}"${p.name === data.research_judge ? " selected" : ""}>${p.name}</option>`).join("");
+  $("#export-dir").value = "";        // empty by default — the stored path is the "current:" line
+  renderExportCurrent();
+  $("#artifacts-dir").value = "";
+  renderArtifactsCurrent();
+  renderThemeControls();
   $("#providers-overlay").classList.remove("hidden");
 }
 
-$("#providers-btn").addEventListener("click", () => openProviders().catch((e) => banner(e.message)));
+function renderArtifactsCurrent() {
+  const el = $("#artifacts-current"); if (!el) return;
+  const v = (STATE.ui.artifacts_dir || "").trim();
+  el.textContent = v ? `current: ${v}` : "current: (off — copy still works)";
+}
+$("#artifacts-save").addEventListener("click", async () => {
+  const v = $("#artifacts-dir").value.trim();
+  if (!v) { banner("Paste a folder path to change it — current setting kept."); return; }
+  try {
+    STATE.ui = await api("/ui", "PUT", { artifacts_dir: v });
+    $("#artifacts-dir").value = "";
+    renderArtifactsCurrent();
+    banner("Artifacts folder saved.");
+  } catch (e) { banner(e.message); }
+});
+
+// Prefilled directory/name fields: select-all on focus so typing or pasting a new
+// value REPLACES it instead of appending onto the old path.
+["#export-dir", "#artifacts-dir", "#display-name"].forEach((sel) => {
+  const e = $(sel); if (e) e.addEventListener("focus", () => e.select());
+});
+
+$("#chip-tokens").addEventListener("change", (e) => _chipToggle("show_token_estimate", e.target.checked));
+$("#chip-pct").addEventListener("change", (e) => _chipToggle("show_model_pct", e.target.checked));
+$("#display-name-save").addEventListener("click", async () => {
+  const v = $("#display-name").value.trim();
+  STATE.ui.display_name = v;
+  render();   // relabel human turns on screen immediately
+  try { STATE.ui = await api("/ui", "PUT", { display_name: v }); banner(v ? `The app will call you "${v}".` : "Name reset to “human”."); }
+  catch (e) { banner(e.message); }
+});
+
+function renderExportCurrent() {
+  const el = $("#export-current"); if (!el) return;
+  const v = (STATE.ui.export_dir || "").trim();
+  el.textContent = v ? `current: ${v}` : "current: (off — no export)";
+}
+
+// accent hue swatches — picking one recolours the whole UI and persists to ui.json
+const ACCENT_HUES = [233, 255, 290, 330, 25, 75, 145, 190];
+function renderAccentSwatches() {
+  const box = $("#accent-swatches"); if (!box) return;
+  box.innerHTML = "";
+  const cur = Number(STATE.ui.accent_hue);
+  for (const h of ACCENT_HUES) {
+    const b = el("button", "accent-swatch" + (h === cur ? " sel" : ""));
+    b.style.background = `oklch(0.6 0.15 ${h})`;
+    b.title = `hue ${h}`;
+    b.addEventListener("click", async () => {
+      STATE.ui.accent_hue = h; applyAccent(h); renderAccentSwatches();
+      try { await api("/ui", "PUT", { accent_hue: h }); } catch (e) { /* non-fatal */ }
+    });
+    box.append(b);
+  }
+}
+
+// segmented control: builds buttons for {options}, marks the current, applies + persists
+function renderSeg(boxId, options, current, onPick) {
+  const box = $(boxId); if (!box) return;
+  box.innerHTML = "";
+  for (const o of options) {
+    const b = el("button", current === o.value ? "sel" : "");
+    b.textContent = o.label;
+    b.addEventListener("click", () => onPick(o.value));
+    box.append(b);
+  }
+}
+function renderThemeControls() {
+  renderAccentSwatches();
+  renderSeg("#brightness-opts",
+    [{ value: "soft", label: "Soft" }, { value: "default", label: "Default" }, { value: "crisp", label: "Crisp" }],
+    STATE.ui.text_brightness || "default",
+    async (v) => { STATE.ui.text_brightness = v; applyBrightness(v); renderThemeControls();
+                   try { await api("/ui", "PUT", { text_brightness: v }); } catch (e) {} });
+  renderSeg("#fontsize-opts",
+    [{ value: "compact", label: "Compact" }, { value: "default", label: "Default" }, { value: "large", label: "Large" }],
+    STATE.ui.font_scale || "default",
+    async (v) => { STATE.ui.font_scale = v; applyFontScale(v); renderThemeControls();
+                   try { await api("/ui", "PUT", { font_scale: v }); } catch (e) {} });
+  $("#display-name").value = STATE.ui.display_name || "";
+  $("#chip-tokens").checked = STATE.ui.show_token_estimate !== false;
+  $("#chip-pct").checked = !!STATE.ui.show_model_pct;
+}
+
+async function _chipToggle(key, checked) {
+  STATE.ui[key] = checked; renderTokenBar();
+  try { await api("/ui", "PUT", { [key]: checked }); } catch (e) { /* non-fatal */ }
+}
+
+$("#export-save").addEventListener("click", async () => {
+  const v = $("#export-dir").value.trim();
+  if (!v) { banner("Paste a folder path to change it — current setting kept."); return; }
+  try {
+    STATE.ui = await api("/ui", "PUT", { export_dir: v });
+    $("#export-dir").value = "";              // clear for the next paste; stored value is the current: line
+    renderExportCurrent();
+    banner("Export folder saved.");
+  } catch (e) { banner(e.message); }
+});
+
+// settings tabs (Providers / Theme / Data) — view-switching, no new persistence
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll(".tab-pane").forEach((p) => p.classList.toggle("hidden", p.dataset.pane !== name));
+}
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => switchTab(t.dataset.tab)));
+
+$("#providers-btn").addEventListener("click", () => { switchTab("providers"); openProviders().catch((e) => banner(e.message)); });
 $("#providers-close").addEventListener("click", () => $("#providers-overlay").classList.add("hidden"));
 $("#judge-select").addEventListener("change", async (e) => {
   try { await api("/research-judge", "PUT", { name: e.target.value }); } catch (err) { banner(err.message); }
@@ -392,11 +991,22 @@ $("#add-btn").addEventListener("click", async () => {
   syncModeUI();
   if (!libsReady()) banner("Markdown/sanitizer failed to load — rendering as plain text (safe).");
   try {
+    STATE.ui = await api("/ui");
+    applyUI();
+    applyAccent(STATE.ui.accent_hue);            // reconstruct the theme from the server
+    applyBrightness(STATE.ui.text_brightness);
+    applyFontScale(STATE.ui.font_scale);
     const part = await api("/participants");
     STATE.participants = part.participants || [];
-    STATE.judge = part.research_judge || "";
-    renderAddressee(); renderPanelPick(); renderJudgePick();
-    adoptTranscript(await api("/transcript"));
-    await refreshTranscriptList();
+    STATE.globalJudge = part.research_judge || "";
+    const rooms = await api("/rooms");
+    STATE.rooms = rooms.rooms || [];
+    renderSidebar();
+    if (rooms.active) {
+      adoptRoom(await api(`/rooms/${rooms.active}/activate`, "POST"));
+      await refreshRooms();
+    } else {
+      renderComposerPickers(); render();
+    }
   } catch (e) { banner(`could not reach engine: ${e.message}`); }
 })();

@@ -7,9 +7,11 @@ secrets.json
 
 # --- local engine state ---
 vault/.current
-# transcripts: keep the vault dir (.gitkeep), not the contents. Point
-# RESEARCH_ROOM_VAULT at your own (Obsidian) vault to track transcripts there.
-vault/*.jsonl
+# Rooms are folders under the vault (vault/<room_id>/{main,margin}.jsonl + room.json).
+# Keep the vault dir (.gitkeep), not its contents — point RESEARCH_ROOM_VAULT at your
+# own (Obsidian) vault to track transcripts there.
+vault/*/
+vault/*.jsonl          # legacy flat transcripts (pre-rooms), if any linger
 
 # --- python ---
 __pycache__/

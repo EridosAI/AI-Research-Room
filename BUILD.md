@@ -1,5 +1,13 @@
 # Research room — Claude Code build plan
 
+> **Status: BUILT.** This is the **build record** — the phase-by-phase plan (Phases 0–7) it
+> was constructed from, gates and all. It is intentionally *not* mutated to match the final
+> architecture; for how the system works **today**, read [README.md](README.md), and for
+> deliberate "not yet" items see [DEFERRED.md](DEFERRED.md). Phases 8–10 (rooms, sidebar,
+> margin) were added by a follow-up amendment, preserved verbatim in
+> [BUILD_amendment_rooms_margin.md](BUILD_amendment_rooms_margin.md). Kept for the
+> archaeology — how the thing came to be, not where it landed.
+
 A phased, executable plan for the multi-model research room. Self-contained: it folds in the
 v0 spec and every amendment since. Build one phase at a time and run its **Done when** check
 before moving on.

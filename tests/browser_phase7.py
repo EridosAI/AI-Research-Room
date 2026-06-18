@@ -38,7 +38,7 @@ def post(path, body):
 def wait_up():
     for _ in range(50):
         try:
-            urllib.request.urlopen(BASE + "/transcript", timeout=2); return
+            urllib.request.urlopen(BASE + "/rooms", timeout=2); return
         except Exception:
             time.sleep(0.2)
     raise SystemExit("server did not start")

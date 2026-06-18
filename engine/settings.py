@@ -22,14 +22,28 @@ RUNNERS_DIR = REPO_ROOT / "engine" / "runners"
 # Judge rubric (reused from the fusion package).
 REFS_DIR = REPO_ROOT / "references"
 
-# Transcript dir = the vault path. Defaults to <repo>/vault for dev; point
-# RESEARCH_ROOM_VAULT at your Obsidian vault in real use.
+# Vault path. Defaults to <repo>/vault for dev; point RESEARCH_ROOM_VAULT at your
+# Obsidian vault in real use.
 VAULT_DIR = Path(os.environ.get("RESEARCH_ROOM_VAULT", REPO_ROOT / "vault"))
-CURRENT_PTR = VAULT_DIR / ".current"   # per-machine active-transcript pointer
+
+# Rooms are folders inside the vault (each room = one folder: main.jsonl +
+# margin.jsonl + room.json). The rooms dir defaults to the vault path; override
+# the vault location via RESEARCH_ROOM_VAULT.
+ROOMS_DIR = VAULT_DIR
+
+# Per-machine pointer to the client's *active room id*. This is a UI/CLI
+# convenience only — the engine never reads it (no engine-level "current").
+CURRENT_PTR = VAULT_DIR / ".current"
 
 # Secrets dir — OUTSIDE the vault and the repo. Never git-tracked.
 CONFIG_DIR = Path(os.environ.get("RESEARCH_ROOM_HOME", Path.home() / ".config" / "research-room"))
 SECRETS_FILE = Path(os.environ.get("RESEARCH_ROOM_SECRETS", CONFIG_DIR / "secrets.json"))
+
+# App-level UI state (sidebar collapsed/width). Per-machine, NOT secret, and NOT
+# per-room (room.json owns per-room splitter width + roster). Stored server-side
+# so the web UI keeps the no-browser-storage rule — reload reconstructs from here
+# plus room.json, never from localStorage.
+UI_FILE = Path(os.environ.get("RESEARCH_ROOM_UI", CONFIG_DIR / "ui.json"))
 
 # Converse chat-completion output cap (well under the non-streaming timeout ceiling).
 CONVERSE_MAX_TOKENS = int(os.environ.get("RESEARCH_ROOM_MAX_TOKENS", "8192"))

@@ -17,17 +17,28 @@ BASE = f"http://127.0.0.1:{PORT}"
 HOME = Path("/tmp/p6")
 
 
-def post(path, body):
+def _json(path, method="GET", body=None):
     import json
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    return urllib.request.urlopen(req, timeout=10).read()
+    data = json.dumps(body).encode() if body is not None else None
+    hdr = {"Content-Type": "application/json"} if body is not None else {}
+    return json.loads(urllib.request.urlopen(urllib.request.Request(
+        BASE + path, data=data, headers=hdr, method=method), timeout=10).read() or "{}")
+
+
+def seed_room(title):
+    """Create a room and give it the full enabled roster + the global judge — the
+    real /rooms path, replacing the retired seeded /transcript shim."""
+    rid = _json("/rooms", "POST", {"title": title})["room"]["id"]
+    part = _json("/participants")
+    enabled = [p["name"] for p in part["participants"] if p["enabled"]]
+    _json(f"/rooms/{rid}", "PUT", {"participants": enabled, "judge": part["research_judge"]})
+    return rid
 
 
 def wait_up():
     for _ in range(50):
         try:
-            urllib.request.urlopen(BASE + "/transcript", timeout=2); return
+            urllib.request.urlopen(BASE + "/rooms", timeout=2); return
         except Exception:
             time.sleep(0.2)
     raise SystemExit("server did not start")
@@ -48,7 +59,7 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_up()
-        post("/transcript", {"title": "browser test"})   # pre-create active transcript
+        seed_room("browser test")   # pre-create + configure the active room
 
         with sync_playwright() as p:
             browser = p.chromium.launch()

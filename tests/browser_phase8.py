@@ -14,9 +14,21 @@ REPO = Path(__file__).resolve().parents[1]
 PORT = 8809; BASE = f"http://127.0.0.1:{PORT}"; HOME = Path("/tmp/p8")
 
 
-def post(path, body):
-    urllib.request.urlopen(urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST"), timeout=10).read()
+def _json(path, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    hdr = {"Content-Type": "application/json"} if body is not None else {}
+    return json.loads(urllib.request.urlopen(urllib.request.Request(
+        BASE + path, data=data, headers=hdr, method=method), timeout=10).read() or "{}")
+
+
+def seed_room(title):
+    """Create + configure a room via the real /rooms path (roster = enabled, judge
+    = global) — replaces the retired seeded /transcript shim."""
+    rid = _json("/rooms", "POST", {"title": title})["room"]["id"]
+    part = _json("/participants")
+    enabled = [p["name"] for p in part["participants"] if p["enabled"]]
+    _json(f"/rooms/{rid}", "PUT", {"participants": enabled, "judge": part["research_judge"]})
+    return rid
 
 
 def main():
@@ -29,9 +41,9 @@ def main():
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(50):
-            try: urllib.request.urlopen(BASE + "/transcript", timeout=2); break
+            try: urllib.request.urlopen(BASE + "/rooms", timeout=2); break
             except Exception: time.sleep(0.2)
-        post("/transcript", {"title": "picker test"})
+        seed_room("picker test")
         with sync_playwright() as p:
             b = p.chromium.launch(); page = b.new_page()
             page.goto(BASE + "/", wait_until="networkidle")

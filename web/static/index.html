@@ -12,68 +12,187 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
-  <header>
-    <div class="hgroup">
-      <h1>research room</h1>
-      <span id="title" class="title"></span>
+  <!-- left rail: rooms (the new front door) + providers at the foot -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-head">
+      <span class="brand">research room</span>
+      <button id="sidebar-collapse" title="collapse sidebar">‹</button>
     </div>
-    <div class="controls">
-      <select id="transcripts" title="active transcript"></select>
-      <button id="new-btn">+ new</button>
-      <button id="providers-btn" title="manage providers &amp; models">⚙ providers</button>
+    <button id="new-room-btn" class="new-room">+ new room</button>
+    <div id="room-list" class="room-list"></div>
+    <div class="sidebar-foot">
+      <button id="providers-btn" title="settings">⚙ settings</button>
     </div>
-  </header>
+    <div id="sidebar-resizer" class="sidebar-resizer" title="drag to resize"></div>
+  </aside>
+  <button id="sidebar-expand" class="sidebar-expand hidden" title="show rooms">☰</button>
+  <div id="room-preview" class="room-preview hidden"></div>
 
-  <div id="banner" class="banner hidden"></div>
-
-  <!-- model-management panel (Phase 7) -->
-  <div id="providers-overlay" class="overlay hidden">
-    <div class="overlay-card">
-      <div class="overlay-head">
-        <h2>Providers &amp; models</h2>
-        <button id="providers-close">×</button>
+  <div id="app" class="app">
+    <header>
+      <div class="hgroup">
+        <span id="title" class="title"></span>
       </div>
-      <div id="provider-list"></div>
-      <div class="add-row">
-        <h3>+ add provider</h3>
-        <span class="hint">any OpenAI-compatible endpoint (base_url stored verbatim)</span>
-        <div class="add-grid">
-          <input id="add-name" placeholder="name (e.g. openrouter)" />
-          <input id="add-base" placeholder="base_url" />
-          <input id="add-model" placeholder="model (optional)" />
-          <input id="add-key" type="password" placeholder="api key (optional)" />
-          <button id="add-btn">add</button>
+      <div class="controls">
+        <button id="margin-toggle" title="open the margin (side-channel)" disabled>margin</button>
+        <button id="room-settings-btn" title="this room's models &amp; judge" disabled>models</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- per-room model selection (Phase 9): which providers are in THIS room + its judge -->
+    <div id="room-settings-overlay" class="overlay hidden">
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <h2>Room models &amp; judge</h2>
+          <button id="room-settings-close">×</button>
+        </div>
+        <p class="hint">Pick which configured providers take part in this room, and the judge
+          that synthesizes its research rounds. Research is disabled until a judge is chosen.</p>
+        <div id="room-roster" class="room-roster"></div>
+        <div class="judge-row">
+          <label>room judge</label>
+          <select id="room-judge"></select>
+        </div>
+        <div class="judge-row">
+          <label>tags</label>
+          <input id="room-tags" type="text" placeholder="comma, separated  (→ .md frontmatter)" />
+        </div>
+        <div class="pcard-actions"><span class="right"><button id="room-settings-save">save</button></span></div>
+      </div>
+    </div>
+
+    <!-- settings home: tabbed (Providers / Theme / Data). Panes hold the existing
+         panels moved under tabs — same DOM ids, just housed differently. -->
+    <div id="providers-overlay" class="overlay hidden">
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <h2>Settings</h2>
+          <button id="providers-close">×</button>
+        </div>
+        <div class="tabs">
+          <button class="tab active" data-tab="providers">Providers</button>
+          <button class="tab" data-tab="theme">Theme</button>
+          <button class="tab" data-tab="data">Data</button>
+        </div>
+
+        <div class="tab-pane" data-pane="providers">
+          <div id="provider-list"></div>
+          <div class="add-row">
+            <h3>+ add provider</h3>
+            <span class="hint">any OpenAI-compatible endpoint (base_url stored verbatim)</span>
+            <div class="add-grid">
+              <input id="add-name" placeholder="name (e.g. openrouter)" />
+              <input id="add-base" placeholder="base_url" />
+              <input id="add-model" placeholder="model (optional)" />
+              <input id="add-key" type="password" placeholder="api key (optional)" />
+              <button id="add-btn">add</button>
+            </div>
+          </div>
+          <div class="judge-row">
+            <label>default research judge</label>
+            <select id="judge-select"></select>
+            <span class="hint">seeds the judge for migrated rooms (a metered call if Claude)</span>
+          </div>
+        </div>
+
+        <div class="tab-pane hidden" data-pane="theme">
+          <div class="judge-row">
+            <label>accent</label>
+            <span id="accent-swatches" class="accent-swatches"></span>
+            <span class="hint">recolours every interactive state</span>
+          </div>
+          <div class="judge-row">
+            <label>text brightness</label>
+            <span id="brightness-opts" class="seg"></span>
+            <span class="hint">calms text on the dark surfaces</span>
+          </div>
+          <div class="judge-row">
+            <label>font size</label>
+            <span id="fontsize-opts" class="seg"></span>
+          </div>
+          <div class="judge-row">
+            <label>display name</label>
+            <input id="display-name" type="text" placeholder="how the app addresses you (default: human)" />
+            <button id="display-name-save">save</button>
+          </div>
+          <div class="judge-row">
+            <label>token chip</label>
+            <label class="authtoggle"><input type="checkbox" id="chip-tokens" /> token estimate</label>
+            <label class="authtoggle"><input type="checkbox" id="chip-pct" /> model %</label>
+          </div>
+        </div>
+
+        <div class="tab-pane hidden" data-pane="data">
+          <div class="judge-row">
+            <label>obsidian export folder</label>
+            <input id="export-dir" type="text" placeholder="paste a folder to change it — current shown below" />
+            <button id="export-save">save</button>
+            <span class="hint">each room renders a read-only .md here after every turn</span>
+          </div>
+          <div id="export-current" class="export-current"></div>
+          <div class="judge-row">
+            <label>artifacts folder</label>
+            <input id="artifacts-dir" type="text" placeholder="paste a folder to change it — current shown below" />
+            <button id="artifacts-save">save</button>
+            <span class="hint">a model's ```markdown block auto-saves here</span>
+          </div>
+          <div id="artifacts-current" class="export-current"></div>
         </div>
       </div>
-      <div class="judge-row">
-        <label>research judge</label>
-        <select id="judge-select"></select>
-        <span class="hint">synthesizes every research round (a metered call if Claude)</span>
+    </div>
+
+    <div class="workspace">
+      <div class="main-col">
+        <main id="stream" class="stream">
+          <div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>
+        </main>
+
+        <footer class="composer">
+          <div id="token-bar" class="token-bar"></div>
+          <div class="composer-row">
+            <label class="mode"><input type="radio" name="mode" value="converse" checked /> converse</label>
+            <label class="mode"><input type="radio" name="mode" value="research" /> research</label>
+            <span id="converse-opts">→ <select id="addressee" title="addressed model"></select></span>
+            <span id="research-opts" class="hidden">effort
+              <select id="effort"><option>low</option><option selected>medium</option><option>high</option></select>
+              judge <select id="judge-pick" title="who synthesizes this round"></select>
+              <span id="panel-pick" class="panel-pick"></span>
+            </span>
+          </div>
+          <div class="composer-row">
+            <textarea id="input" rows="3" placeholder="Message the room…  (Enter to send · Shift+Enter for newline)"></textarea>
+            <button id="send-btn">send</button>
+          </div>
+          <div id="status" class="status"></div>
+        </footer>
       </div>
+
+      <!-- the margin: a window inside the window. Reads main (read-only, filtered,
+           windowed) as background; writes only to its own margin.jsonl. One-way by
+           default — margin → main only via an explicit "copy to main" per answer. -->
+      <div id="margin-splitter" class="margin-splitter hidden"></div>
+      <aside id="margin" class="margin hidden">
+        <div class="margin-head">
+          <span class="margin-title">margin</span>
+          <select id="margin-model" title="margin model (this room)"></select>
+          <select id="margin-window" title="how much of the main chat the margin sees">
+            <option value="last_1">last turn</option>
+            <option value="last_3" selected>last 3 turns</option>
+            <option value="full">full transcript</option>
+          </select>
+          <button id="margin-close" title="hide the margin">×</button>
+        </div>
+        <div id="margin-stream" class="margin-stream"></div>
+        <div class="margin-composer">
+          <textarea id="margin-input" rows="2" placeholder="side question… (Enter to send)"></textarea>
+          <button id="margin-send">ask</button>
+        </div>
+        <div id="margin-status" class="status"></div>
+      </aside>
     </div>
   </div>
-
-  <main id="stream" class="stream">
-    <div class="empty">No active transcript. Click <b>+ new</b> to start one.</div>
-  </main>
-
-  <footer class="composer">
-    <div class="composer-row">
-      <label class="mode"><input type="radio" name="mode" value="converse" checked /> converse</label>
-      <label class="mode"><input type="radio" name="mode" value="research" /> research</label>
-      <span id="converse-opts">→ <select id="addressee" title="addressed model"></select></span>
-      <span id="research-opts" class="hidden">effort
-        <select id="effort"><option>low</option><option selected>medium</option><option>high</option></select>
-        judge <select id="judge-pick" title="who synthesizes this round"></select>
-        <span id="panel-pick" class="panel-pick"></span>
-      </span>
-    </div>
-    <div class="composer-row">
-      <textarea id="input" rows="3" placeholder="Message the room…  (⌘/Ctrl+Enter to send)"></textarea>
-      <button id="send-btn">send</button>
-    </div>
-    <div id="status" class="status"></div>
-  </footer>
 
   <script src="/static/app.js"></script>
 </body>

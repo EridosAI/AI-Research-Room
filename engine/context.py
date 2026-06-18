@@ -19,27 +19,44 @@ from __future__ import annotations
 from . import providers
 
 
-def room_system(for_speaker: str) -> str:
-    others = [k for k in providers.enabled() if k != for_speaker]
+def room_system(for_speaker: str, participants: list[str] | None = None,
+                human_label: str = "human") -> str:
+    roster = participants if participants is not None else providers.enabled()
+    others = [k for k in roster if k != for_speaker]
     others_str = ", ".join(others) if others else "(none)"
     return (
         f"You are [{for_speaker}] in a multi-model research room.\n"
-        "Below is the full conversation, labeled by speaker. [human] is the researcher.\n"
+        f"Below is the full conversation, labeled by speaker. [{human_label}] is the researcher.\n"
         f"{others_str} are other AI participants — peers, not you.\n"
         f"Read all of it, then respond as yourself ([{for_speaker}]) to the latest "
-        "[human] turn.\n"
+        f"[{human_label}] turn.\n"
         "You may agree with, build on, or push back against what other participants said."
     )
 
 
-def build_context(transcript: list[dict], for_speaker: str, mode: str) -> dict:
+def forward_turns(transcript: list[dict]) -> list[dict]:
+    """The synthesis-only forward view: every turn EXCEPT raw panelist answers.
+    This is the single definition of the Phase-1 filter — build_context and the
+    margin's background both build on it, so they agree on what flows forward."""
+    return [t for t in transcript if not (t.get("meta") or {}).get("is_panelist_raw")]
+
+
+def format_turns(turns: list[dict], human_label: str = "human") -> str:
+    """Flatten turns into one labelled block: `[speaker]: text` per turn. The human
+    role is shown as `human_label` (the user's chosen display name) — this is the only
+    place the name reaches the model; storage keeps the `human` role untouched."""
+    def lbl(t: dict) -> str:
+        return human_label if t["speaker"] == "human" else t["speaker"]
+    return "".join(f"[{lbl(t)}]: {t['text']}\n\n" for t in turns)
+
+
+def build_context(transcript: list[dict], for_speaker: str, mode: str,
+                  participants: list[str] | None = None, human_label: str = "human") -> dict:
     """Return {"system": str, "messages": [{"role": "user", "content": str}]}."""
-    included = [t for t in transcript
-               if not (t.get("meta") or {}).get("is_panelist_raw")]
-    body = "".join(f"[{t['speaker']}]: {t['text']}\n\n" for t in included)
+    body = format_turns(forward_turns(transcript), human_label)
     body += f"Respond as [{for_speaker}]."
     return {
-        "system": room_system(for_speaker),
+        "system": room_system(for_speaker, participants, human_label),
         "messages": [{"role": "user", "content": body}],
     }
 

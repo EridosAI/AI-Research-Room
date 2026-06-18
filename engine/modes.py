@@ -1,20 +1,22 @@
-"""modes.py — the two call patterns over the substrate.
+"""modes.py — the two call patterns over the substrate, operating per-room.
 
-research(prompt)  — blind parallel fan-out to all enabled participants, then a
-                    judge synthesizes. Degrades gracefully: a failed panelist is
-                    dropped and marked absent (never silent agreement); abort only
-                    if zero panelists return.
-converse(prompt, addressed_to) — one model answers, seeing the synthesis-only
-                    context (raw panel answers never flow forward).
+research(room_id, prompt)  — blind parallel fan-out to the room's participants,
+                    then a judge synthesizes. Degrades gracefully: a failed
+                    panelist is dropped and marked absent (never silent
+                    agreement); abort only if zero panelists return.
+converse(room_id, prompt, addressed_to) — one model answers, seeing the room's
+                    synthesis-only context (raw panel answers never flow forward).
+
+Both resolve to the given room's main.jsonl and read that room's
+participants/judge from room.json. There is no engine-level "current" room.
 """
 
 from __future__ import annotations
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
-from . import providers, settings, transcript
+from . import providers, rooms, settings, transcript
 from .context import build_context
 
 # Panelists answer the task straight, blind to each other.
@@ -33,21 +35,31 @@ JUDGE_SYSTEM = (
 )
 
 
-def _resolve_path(path: str | Path | None) -> Path:
-    return Path(path) if path is not None else transcript.current()
-
-
 # ---- research ---------------------------------------------------------------
 def _panelist(speaker: str, blind_payload: dict, effort: str):
-    """Run one panelist. Returns (speaker, text, error). Never raises — a failure
-    becomes an absence, captured for the judge prompt."""
+    """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
+    a failure becomes an absence, captured for the judge prompt."""
     try:
-        text = providers.call_model(speaker, blind_payload, tools=True, effort=effort)
-        if not text.strip():
+        reply = providers.call_model(speaker, blind_payload, tools=True, effort=effort)
+        if not reply.text.strip():
             return speaker, None, "empty answer"
-        return speaker, text, None
+        return speaker, reply, None
     except Exception as e:  # noqa: BLE001 — any failure → absent, never agreement
         return speaker, None, str(e)
+
+
+def _reply_meta(reply) -> dict:
+    """meta fields carried from a reply: reasoning (best-effort) + token usage.
+    Both live on the turn's meta, never in text — so build_context never re-sends
+    them to a model."""
+    m: dict = {}
+    if getattr(reply, "reasoning", None):
+        m["reasoning"] = reply.reasoning
+        if reply.reasoning_kind:
+            m["reasoning_kind"] = reply.reasoning_kind
+    if getattr(reply, "usage", None):
+        m["usage"] = reply.usage
+    return m
 
 
 def _build_judge_prompt(task: str, answers: list[tuple[str, str]],
@@ -74,11 +86,16 @@ def _build_judge_prompt(task: str, answers: list[tuple[str, str]],
     return "\n".join(parts)
 
 
-def research(prompt: str, panel: list[str] | None = None, judge: str | None = None,
-             effort: str = "medium", path: str | Path | None = None) -> str:
-    path = _resolve_path(path)
-    panel = panel if panel is not None else providers.enabled()
-    judge = judge or providers.research_judge()
+def research(room_id: str, prompt: str, panel: list[str] | None = None,
+             judge: str | None = None, effort: str = "medium") -> str:
+    room = rooms.load_room(room_id)
+    path = rooms.main_path(room_id)
+    panel = panel if panel is not None else room["participants"]
+    judge = judge or room["judge"]
+    if not panel:
+        raise ValueError("no panelists selected for this room")
+    if not judge:
+        raise ValueError("no judge selected for this room")
     round_id = str(uuid.uuid4())
 
     # 1. append human turn
@@ -94,16 +111,16 @@ def research(prompt: str, panel: list[str] | None = None, judge: str | None = No
     # 3. append each raw answer; collect absences
     answers: list[tuple[str, str]] = []
     absent: list[tuple[str, str]] = []
-    for speaker, text, err in results:
+    for speaker, reply, err in results:
         if err is not None:
             absent.append((speaker, err))
             continue
         p = providers.provider(speaker)
+        meta = {"round_id": round_id, "is_panelist_raw": True, "model": p.model,
+                "tools": p.auth_mode == "cli", **_reply_meta(reply)}   # only cli actually searched
         transcript.append(transcript.make_turn(
-            "research", "ai", speaker, text,
-            {"round_id": round_id, "is_panelist_raw": True, "model": p.model,
-             "tools": p.auth_mode == "cli"}), path)   # only cli actually searched
-        answers.append((speaker, text))
+            "research", "ai", speaker, reply.text, meta), path)
+        answers.append((speaker, reply.text))   # judge sees text only — never reasoning
 
     if not answers:
         raise RuntimeError("every panelist failed — nothing to judge")
@@ -118,23 +135,24 @@ def research(prompt: str, panel: list[str] | None = None, judge: str | None = No
     judge_used = judge
     meta = {"round_id": round_id}
     try:
-        synthesis = _call_judge(judge, judge_payload, effort)
+        reply = _call_judge(judge, judge_payload, effort)
     except Exception:  # noqa: BLE001
         fallbacks = [s for s, _ in answers if s != judge]
         if not fallbacks:
             raise
         judge_used = fallbacks[0]
-        synthesis = _call_judge(judge_used, judge_payload, effort)
+        reply = _call_judge(judge_used, judge_payload, effort)
         meta["judge_fallback_from"] = judge
 
     # 5. append synthesis (role=judge, same round_id) and return
     meta["model"] = providers.provider(judge_used).model
+    meta.update(_reply_meta(reply))
     transcript.append(transcript.make_turn(
-        "research", "judge", judge_used, synthesis, meta), path)
-    return synthesis
+        "research", "judge", judge_used, reply.text, meta), path)
+    return reply.text
 
 
-def _call_judge(judge: str, payload: dict, effort: str) -> str:
+def _call_judge(judge: str, payload: dict, effort: str):
     try:
         return providers.call_model(judge, payload, tools=True, effort=effort)
     except providers.RunnerUnavailable:
@@ -142,21 +160,24 @@ def _call_judge(judge: str, payload: dict, effort: str) -> str:
 
 
 # ---- converse ---------------------------------------------------------------
-def converse(prompt: str, addressed_to: str | None = None,
-             path: str | Path | None = None) -> str:
-    path = _resolve_path(path)
+def converse(room_id: str, prompt: str, addressed_to: str | None = None,
+             human_label: str = "human") -> str:
+    room = rooms.load_room(room_id)
+    path = rooms.main_path(room_id)
     if not addressed_to:
         addressed_to = (transcript.last_ai_speaker(path)
-                        or (providers.enabled() or providers.provider_keys())[0])
+                        or (room["participants"] or providers.enabled()
+                            or providers.provider_keys())[0])
     providers.provider(addressed_to)   # validate; raises ValueError if unknown
 
     transcript.append(transcript.make_turn(
         "converse", "human", "human", prompt, {"addressed_to": addressed_to}), path)
 
-    ctx = build_context(transcript.load(path), addressed_to, "converse")
+    ctx = build_context(transcript.load(path), addressed_to, "converse",
+                        participants=room["participants"], human_label=human_label)
     reply = providers.call_model(addressed_to, ctx, tools=False)
 
+    meta = {"model": providers.provider(addressed_to).model, **_reply_meta(reply)}
     transcript.append(transcript.make_turn(
-        "converse", "ai", addressed_to, reply,
-        {"model": providers.provider(addressed_to).model}), path)
-    return reply
+        "converse", "ai", addressed_to, reply.text, meta), path)
+    return reply.text

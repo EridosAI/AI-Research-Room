@@ -2,49 +2,103 @@
 
 A multi-model research room: a headless **engine** plus thin **clients** (a CLI and a
 local web UI) that let several LLMs — Claude, Grok, Kimi, DeepSeek, or any
-OpenAI-compatible endpoint you add — work the same shared transcript. Two modes:
+OpenAI-compatible endpoint you add — work shared transcripts. You keep many **rooms**
+(each its own conversation), and in any room you can:
 
-- **converse** — address one model; it answers seeing the conversation so far.
+- **converse** — address one model; it answers seeing the room so far.
 - **research** — a panel of models answers the prompt **blind and in parallel**, then a
-  **judge** model synthesizes their answers into one (the "fusion" pattern). You pick which
-  models join each round.
+  **judge** model synthesizes their answers into one (the "fusion" pattern).
+- **margin** — a side-channel inside a room for quick side-questions that read the main
+  chat as background but never pollute it (until you explicitly copy one answer across).
 
-The engine owns the transcript and all orchestration; clients are pure views over it. The
-transcript is append-only JSONL in a git-tracked (Obsidian-friendly) vault — **API keys
-never go there**.
+The engine owns the data and all orchestration; clients are pure views over it.
+**API keys never live in the repo or the vault.**
 
 ---
 
+## Model
+
+Two layers, cleanly split:
+
+- **App-global** — your provider keys (`~/.config/research-room/secrets.json`) and the
+  provider registry (`config.toml`: which providers exist, their endpoints/models/auth).
+  Keys are entered once, in the sidebar, and **never duplicated per room**.
+- **Per-room** — which of those providers are *active in this room*, the room's judge and
+  margin model, plus the room's own state. A **room is a folder**:
+
+  ```
+  <vault>/<room_id>/
+    main.jsonl     # the conversation
+    margin.jsonl   # the side-channel (created on first margin use)
+    room.json      # title, participants[], judge, margin_model, splitter_width, last_read_pos
+  ```
+
+  `participants`/`judge`/`margin_model` are provider **keys** into the global registry —
+  never copies of config, never secrets. **New rooms start empty**: you choose their
+  models and judge before researching (research is gated until a judge is set).
+
 ## Why it's built this way
 
-- **One transcript, two call patterns.** Every mode is just a pattern over a shared
-  transcript and a single `call_model` interface — no per-mode state machine.
-- **Blind panel + judge.** In research mode panelists never see each other's work; only the
-  judge's synthesis flows forward into later turns (raw panel answers are kept for the record
-  and the UI's "view full", but are filtered out of model context — the *synthesis-only
-  filter*). This keeps the panel honestly independent and the context lean.
+- **One file, three call patterns.** Every mode is a pattern over a room's transcript and
+  a single `call_model` interface — no per-mode state machine.
+- **Blind panel + judge.** Panelists never see each other's work; only the judge's
+  synthesis flows forward into later turns. Raw panel answers are kept for the record and
+  the UI's "view full", but are filtered out of model context — the **synthesis-only
+  filter**. The margin's background reuses that same filter, so a side-question sees the
+  forward view you see, not a flood of raw panel text.
 - **Two adapter shapes cover everything.** `openai` (Bearer, `POST {base}/chat/completions`)
   and `anthropic` (`x-api-key`, `POST {base}/v1/messages`). Any OpenAI-compatible service
   (OpenRouter, a local vLLM/Ollama server, …) drops in with no code change.
-- **Subscription or API per provider.** `auth_mode` is `api` (HTTP + key) or `cli` (shell out
-  to an agentic CLI runner, e.g. Grok on a SuperGrok subscription — **no key**).
+- **Subscription or API per provider.** `auth_mode` is `api` (HTTP + key) or `cli` (shell
+  out to an agentic CLI runner, e.g. Grok on a SuperGrok subscription — **no key**).
 - **Graceful degradation.** A failed panelist is dropped and marked *absent* (never treated
-  as agreement); a round aborts only if everyone fails. If the **judge** itself is
-  unavailable (no key / down), it falls back to a panelist that answered, so a bad judge
-  can't sink an otherwise-good round.
+  as agreement); a round aborts only if everyone fails. If the **judge** is unavailable it
+  falls back to a panelist that answered, so a bad judge can't sink a good round.
+- **Visible reasoning (opt-in, best-effort).** Flip "show reasoning" on a provider and its
+  answers carry the model's reasoning, shown as a collapsed "thinking" disclosure under the
+  answer. It's stored on the turn's `meta`, which `build_context` never serializes — so
+  reasoning is visible only to you and **never re-sent to another model** (also required:
+  some APIs reject replayed reasoning). Providers that don't expose it simply contribute none.
+- **Obsidian export (opt-in).** Set an export folder and every room renders a read-only `.md`
+  there after each turn — the filtered, foregrounded view (syntheses up top, raw panel
+  answers in a collapsed callout, margin excluded) with YAML frontmatter (room, date,
+  participants, your per-room tags) for backlinks. JSONL stays canonical; the `.md` is a
+  one-way, full-rewrite export the app never reads back.
+- **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
+  fill vs the provider's window) plus a running session total — exact from API `usage` where
+  given, estimated (always `~`) for the Grok-CLI path.
+- **Linear-aesthetic theme.** Depth from stacked lighter surfaces (not outlines), a single
+  derived accent (one hue → five oklch roles, user-selectable in settings and persisted to
+  `ui.json`), and local **Inter** (vendored woff2, no CDN — works offline). All colour routes
+  through CSS custom properties; speaker-dot identity colours are the one deliberate exception.
+- **Settings home + theming.** ⚙ settings is a tabbed panel (Providers / Theme / Data). Theme
+  offers accent, **text brightness** (one input derives the whole grey ramp — calms text on the
+  dark surfaces), **font size** (a `--font-scale` multiplier), a **display name** the app (and the
+  models, via context) address you by, and **token-chip toggles** (token estimate / model %).
+  All persist to `ui.json` and survive reload.
+- **Markdown artifacts.** When a model emits a fenced ` ```markdown ` block, the answer shows
+  **copy** (raw `.md` → clipboard) and **save** (→ a configured artifacts folder, collision-safe
+  name); auto-written on detection when the folder is set. Markdown only — no execution, one rule.
+- **Room hover preview.** Hovering a room in the sidebar shows its models, start/last dates, and a
+  truncated summary — instantly, from `room.json`/the JSONL, no model call.
+- **Multi-room concurrency.** Each room has its own lock, so a slow research round in one
+  room never blocks work in another; a round that finishes in a background room lands in
+  its own folder and shows an unread dot rather than rendering into the room on screen. The
+  margin has a *separate* lock again — a side-question runs even while that room's research
+  round is in flight.
 
 ## Security model (the part that matters)
 
 - **Keys live outside the repo and the vault** — `~/.config/research-room/secrets.json`,
-  `chmod 600`. The git-tracked vault holds transcripts only; an hourly auto-commit can never
-  push a key.
+  `chmod 600`. The git-tracked vault holds transcripts only; an auto-commit can never push
+  a key.
 - **Keys are write-only over the API.** `GET /providers` returns last-4 + status, never the
-  key. No endpoint returns a full key; keys are redacted from logs and error bodies.
+  key; keys are redacted from logs and error bodies.
 - **Localhost only.** The server binds `127.0.0.1`; provider/config endpoints additionally
   refuse non-loopback callers.
-- **Model output is sanitized** (markdown → DOMPurify → DOM) on every bubble and panel card,
-  and **fails closed** to plain text if the sanitizer can't load. No browser storage — the UI
-  is a pure view of the transcript.
+- **Model output is sanitized** (markdown → DOMPurify → DOM) on every bubble, panel card,
+  and margin answer, and **fails closed** to plain text if the sanitizer can't load. No
+  browser storage — UI state (sidebar, per-room rosters) is reconstructed from the server.
 
 ---
 
@@ -56,28 +110,31 @@ Requires Python 3.11+.
 pip install -e .          # fastapi, uvicorn, httpx, pydantic
 ```
 
-Research mode's `cli` providers also need their CLI installed and authed (e.g. `grok login`).
+Providers with `auth_mode = "cli"` also need their CLI installed and authed (e.g. Grok).
 
 ## Configure providers
 
 The registry is `config.toml` (base URLs, models, `auth_mode`, `enabled`, colour) — **not
-secrets**. It's machine-managed by the web UI but human-readable. The seeded lineup:
+secrets**. It's machine-managed by the web UI but human-readable. The built-in template:
 
-| key | auth | adapter | base_url | default model |
-|-----|------|---------|----------|---------------|
+| key | auth | adapter | base_url | model |
+|-----|------|---------|----------|-------|
 | `claude` | api | anthropic | `https://api.anthropic.com` | `claude-opus-4-8` |
-| `grok` | cli | — (`run_grok*.sh`) | SuperGrok subscription | `grok-build-0.1` |
+| `grok` | cli | — (`run_grok*.sh`) | SuperGrok subscription | `grok-4` |
 | `kimi` | api | openai | `https://api.moonshot.ai/v1` | `kimi-k2.6` |
 | `deepseek` | api | openai | `https://api.deepseek.com` | `deepseek-v4-pro` |
 
-`base_url` is stored verbatim; the adapter appends `/chat/completions` (openai) or
-`/v1/messages` (anthropic) — it never injects `/v1`, so bases that already end in `/v1`
-aren't doubled. `research_judge` (default `claude`) names the synthesizing model.
+Add more in the UI (⚙ providers) — any OpenAI-compatible endpoint. `base_url` is stored
+verbatim; the adapter appends `/chat/completions` (openai) or `/v1/messages` (anthropic) —
+it never injects `/v1`, so a base already ending in `/v1` isn't doubled. `research_judge`
+names the default synthesizer (each room may override it). Each provider also has a **show
+reasoning** toggle (default off) — on, the engine captures that model's reasoning where the
+backend offers it (DeepSeek's `reasoning_content`, Claude's summarized thinking).
 
 **Set keys through the web UI** (write-only masked field) or drop them into
 `~/.config/research-room/secrets.json`. Env vars are honored as a fallback:
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `MOONSHOT_API_KEY`, `DEEPSEEK_API_KEY`.
-For Grok-on-subscription, keep `XAI_API_KEY` **unset** so it uses `~/.grok/auth.json`.
+For Grok-on-subscription, keep `XAI_API_KEY` **unset** so it uses the CLI's own auth.
 
 ---
 
@@ -89,31 +146,39 @@ For Grok-on-subscription, keep `XAI_API_KEY` **unset** so it uses `~/.grok/auth.
 python -m web.server        # → http://127.0.0.1:8765
 ```
 
-A single static page (vanilla HTML/JS, `marked` + `DOMPurify` from CDN, no build step): a
-colour-coded transcript stream, research rounds rendered as one composite block (collapsed
-panel cards with "view full" above a foregrounded synthesis), a composer with a mode toggle,
-an addressee selector (converse) and a per-round model picker (research), and a **⚙ providers**
-panel to enter keys, test connections, pick
-models, toggle a provider to subscription/CLI, choose the judge, and add new providers.
+A single static page (vanilla HTML/JS, `marked` + `DOMPurify` from CDN, no build step):
+
+- a **left sidebar** of rooms (create, switch, collapse/resize; an unread dot marks a room
+  that updated while you were elsewhere) with **⚙ providers** at the foot;
+- a **room view** — colour-coded transcript stream, research rounds rendered as one
+  composite block (collapsed panel cards with "view full" above the foregrounded
+  synthesis), a composer with a mode toggle, an addressee selector (converse), and a
+  per-round model picker + judge selector (research);
+- a **models** control per room to choose its participants and judge;
+- the **margin** — a resizable side-panel with its own model, a window selector
+  (`last turn` / `last 3 turns` / `full transcript`), and a "copy to main" on each answer.
 
 ### CLI
 
 ```bash
-./room new "embedding models"                 # create a transcript in the vault
-./room ask "best open embedding model?"        # research: all enabled models + judge
-./room say @deepseek "build on that"           # converse, addressed
-./room say "and the tradeoffs?"                # converse, default = last AI speaker
-./room show                                     # print the transcript
-./room who                                      # providers + models + key status
+./room new "embedding models"      # create a room (folder) in the vault, make it active
+./room rooms                       # list rooms (* = active)
+./room use <room_id>               # switch active room
+./room ask "best open embedding model?"   # research: the room's panel + judge
+./room say @deepseek "build on that"       # converse, addressed
+./room say "and the tradeoffs?"            # converse, default = last AI speaker
+./room show                        # print the active room's transcript
+./room who                         # providers + models + key status
 ```
 
-(`python -m cli.room <cmd>` works too.)
+(`python -m cli.room <cmd>` works too. The CLI seeds new rooms with the enabled providers
+so a `new` → `ask` smoke test runs immediately; the web UI forces explicit selection.)
 
 ### One-click launch (Windows + WSL)
 
-`python -m web.server --open` starts the server and opens the UI in your default
-browser once it's accepting connections (opt-in, so headless/test runs stay
-browser-free). For a double-clickable / pinnable launcher:
+`python -m web.server --open` starts the server and opens the UI in your browser once it's
+accepting connections (opt-in, so headless/test runs stay browser-free). For a
+double-clickable / pinnable launcher:
 
 ```bash
 # from the repo root, create a Desktop shortcut (portable — derives its own paths)
@@ -121,9 +186,8 @@ powershell.exe -ExecutionPolicy Bypass -File "$(wslpath -w tools/create_shortcut
 # then right-click "Research Room" on the Desktop → Pin to taskbar
 ```
 
-`Room.bat` is the launcher it points at (the console window it opens *is* the
-server — close it to stop). Drop a `room.ico` in the repo root for a custom
-taskbar icon; without one, Windows uses a default.
+`Room.bat` is the launcher it points at (the console window it opens *is* the server —
+close it to stop). Drop a `room.ico` in the repo root for a custom taskbar icon.
 
 ---
 
@@ -131,46 +195,66 @@ taskbar icon; without one, Windows uses a default.
 
 ```
 engine/
-  transcript.py        append-only JSONL store
-  context.py           build_context (synthesis-only filter) + build_cli_prompt
-  providers.py         registry (config.toml) + call_model dispatch (api | cli | mock)
-  adapters/
-    openai_style.py    Bearer, POST {base}/chat/completions
-    anthropic_style.py x-api-key + version, POST {base}/v1/messages
-  runners/             cli runners (run_grok*.sh) + mock runners for tests
-  modes.py             research() and converse()
-  secrets.py           keys outside the vault, chmod 600
-  settings.py          paths (vault, config, secrets)
-cli/room.py            CLI smoke client
+  transcript.py     append-only JSONL I/O (a transcript is just a file)
+  rooms.py          rooms as folders: CRUD + room.json + legacy migration
+  context.py        the synthesis-only forward filter (shared by build_context + margin)
+  providers.py      registry (config.toml) + call_model dispatch (api | cli | mock)
+  adapters/         openai_style.py, anthropic_style.py
+  runners/          cli runners (run_grok*.sh) + mock runners for tests
+  modes.py          research(room_id, …) and converse(room_id, …)
+  margin.py         the in-room side-channel + copy-to-main
+  export_md.py      one-way Markdown export of a room (filtered view + frontmatter)
+  artifacts.py      detect + save a model's ```markdown block as a .md
+  secrets.py        keys outside the vault, chmod 600
+  settings.py       paths (vault, config, secrets, ui)
+cli/room.py         CLI client (new/rooms/use/ask/say/show/who)
 web/
-  server.py            FastAPI (127.0.0.1): research/converse/transcript/providers
-  static/              the single-page UI
-config.toml            provider registry (NOT secrets)
-references/            judge rubric
-vault/                 transcripts (JSONL) — point RESEARCH_ROOM_VAULT at your Obsidian vault
-tests/                 mock-provider tests + headless-browser UI tests (Playwright)
-BUILD.md               the phased build plan this was built from
+  server.py         FastAPI (127.0.0.1): /rooms*, /participants, /providers*, /ui, margin
+  static/           the single-page UI (sidebar + room view + margin)
+    styles.css      Linear-aesthetic token layer; fonts/ holds vendored Inter (local, no CDN)
+config.toml         provider registry (NOT secrets)
+references/         judge rubric
+vault/              rooms live here — point RESEARCH_ROOM_VAULT at your Obsidian vault
+tests/              mock-provider engine tests + headless-browser UI tests (Playwright)
+BUILD.md            the phased build record (history, not current architecture)
+DEFERRED.md         deliberate "not yet" features
+_archive/           pre-build scaffolding kept for reference — deliberately dead, not wired in
 ```
 
 ## Testing
 
-Orchestration is validated with **mock providers** (`run_mock.sh` / `run_mockfail.sh` + a
-`tests/config.toml` fixture) — fan-out, judge-sees-N, degradation, the synthesis-only filter,
-all at zero token cost. The web UI's security-critical behavior (DOMPurify sanitization,
-fail-closed rendering, the write-only key round-trip, the localhost guard) is verified in a
-real headless Chromium:
+Orchestration is validated with **mock providers** (`run_mock*.sh` + a `tests/config.toml`
+fixture) at zero token cost — fan-out, judge-sees-N, degradation, the synthesis-only
+filter, room isolation, and the margin's isolation. The web UI's security- and
+concurrency-critical behaviour runs in a real headless Chromium:
 
 ```bash
 pip install playwright && playwright install chromium     # dev only
-python tests/browser_phase6.py        # composite render, view-full, sanitization, fail-closed
-python tests/browser_phase7.py        # key round-trip, cli toggle, test/models, secrets loop
+
+python tests/engine_phase8.py          # rooms as folders: isolation, migration, CLI round
+python tests/engine_phase10.py         # margin isolation + windowed background + promote
+python tests/engine_phase11.py         # reasoning isolation + opt-in capture + adapter capture
+python tests/browser_phase6.py         # composite render, view-full, sanitization, fail-closed
+python tests/browser_phase7.py         # key round-trip, cli toggle, /test+/models, secrets loop
+python tests/browser_phase8.py         # per-round model picker + judge fallback
+python tests/browser_phase9.py         # per-round judge override
+python tests/browser_rooms_race.py     # multi-room concurrency: slow round in A, work in B
+python tests/browser_rooms_sidebar.py  # sidebar, forced-decision, no-localStorage reload
+python tests/browser_margin.py         # margin concurrency + UI + copy-to-main + persistence
+python tests/browser_reasoning.py      # collapsed 'thinking' disclosure + provider toggle
+python tests/engine_phase12.py         # Obsidian export: filtered render, frontmatter, no read-back
+python tests/browser_phase12.py        # Enter-to-send + token chip + export/tags UI round-trip
+python tests/browser_phase13.py        # theme tokens + accent engine/persistence + local Inter
+python tests/browser_phase14.py        # settings tabs + brightness/font/display-name + scrollbar
+python tests/engine_artifacts.py       # markdown-artifact detection + collision-safe save
+python tests/browser_phase14b.py       # chip toggles + model % + artifact copy/save + hover preview
 ```
 
 ## Environment
 
-`RESEARCH_ROOM_VAULT` (transcript dir), `RESEARCH_ROOM_HOME` / `RESEARCH_ROOM_SECRETS`
-(secrets location), `RESEARCH_ROOM_CONFIG` (registry path), `RESEARCH_ROOM_HOST` /
-`RESEARCH_ROOM_PORT`, `RESEARCH_ROOM_MAX_TOKENS`.
+`RESEARCH_ROOM_VAULT` (rooms dir), `RESEARCH_ROOM_HOME` / `RESEARCH_ROOM_SECRETS` (secrets
+location), `RESEARCH_ROOM_CONFIG` (registry path), `RESEARCH_ROOM_UI` (sidebar-state file),
+`RESEARCH_ROOM_HOST` / `RESEARCH_ROOM_PORT`, `RESEARCH_ROOM_MAX_TOKENS`.
 
 ## License
 
