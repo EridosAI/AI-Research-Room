@@ -27,6 +27,23 @@ model           = "mockfail-1"
 enabled         = true
 color           = "#aa5555"
 
+[providers.mockslow]      # sleeps before answering — for the multi-room race test.
+auth_mode       = "cli"   # disabled by default so it stays out of enabled() and
+backend         = "cli"   # the other tests; the concurrency test adds it to a
+runner          = "run_mockslow.sh"   # room's roster explicitly.
+converse_runner = "run_mockslow.sh"
+model           = "mockslow-1"
+enabled         = false
+color           = "#7c9cff"
+
+[providers.mockthink]     # mock that emits reasoning (toggle on) — for Phase 11 tests.
+auth_mode = "api"         # disabled by default so it stays out of enabled() and other
+backend   = "mock"        # tests; the reasoning tests add it to a room's roster explicitly.
+model     = "mockthink-1"
+enabled   = false
+reasoning = true
+color     = "#fbcfe8"
+
 [providers.deepseek]      # real provider for the live cheap call
 auth_mode = "api"
 backend   = "openai"
