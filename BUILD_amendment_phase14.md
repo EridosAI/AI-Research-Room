@@ -34,7 +34,7 @@ Notes: thumb wide enough to grab (~10–12px). Apply to the transcript + margin 
 Done when: track invisible against the transcript background, thumb a lighter grabbable handle, themes with surface tokens.
 
 ## Deferred
-Light mode — a second elevation ramp (light surfaces stepping darker) + its own text ramp + re-derived border alphas and --accent-text, behind a dark/light/system switch. The 14B brightness control establishes the text-ramp-as-function pattern the light text ramp reuses. (See DEFERRED.md.)
+Light mode — **SHIPPED in Phase 15** (see [BUILD_amendment_phase15.md](BUILD_amendment_phase15.md)). Built as a `[data-theme="light"]` surface block + mode-aware JS ramps behind a dark/light/system switch; the 14B brightness control's text-ramp-as-function pattern is exactly what the light text ramp reuses.
 
 ## Order
 A (settings container) → B (theme controls) → C (scrollbar). Gate each; suite green, DOM ids intact.

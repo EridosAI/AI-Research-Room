@@ -48,6 +48,14 @@ UI_FILE = Path(os.environ.get("RESEARCH_ROOM_UI", CONFIG_DIR / "ui.json"))
 # Converse chat-completion output cap (well under the non-streaming timeout ceiling).
 CONVERSE_MAX_TOKENS = int(os.environ.get("RESEARCH_ROOM_MAX_TOKENS", "8192"))
 
+# Research output cap — far more generous: panelist answers + the judge synthesis run
+# long, and agentic web-search models (e.g. GLM via OpenRouter) narrate many searches
+# before the answer, so the converse ceiling truncated them. Generous-but-bounded on
+# purpose: a ceiling above a model's own max-output 400s on some direct providers, and
+# the cap is also the circuit breaker on a runaway agentic loop. Raise per your model
+# set via RESEARCH_ROOM_RESEARCH_MAX_TOKENS; a truncation still shows a ⚠ badge.
+RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_ROOM_RESEARCH_MAX_TOKENS", "32768"))
+
 ANTHROPIC_VERSION = "2023-06-01"
 
 

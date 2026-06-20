@@ -72,11 +72,14 @@ def main() -> int:
     crafted = [
         T.make_turn("converse", "human", "human", "MAIN_Q"),
         T.make_turn("converse", "ai", "mock", "VISIBLE_ANSWER",
-                    {"model": "m", "reasoning": "SECRET_REASONING_TRACE", "reasoning_kind": "full"}),
+                    {"model": "m", "reasoning": "SECRET_REASONING_TRACE", "reasoning_kind": "full",
+                     "served_model": "SERVED_SECRET_X"}),
     ]
     body = build_context(crafted, "mock", "converse")["messages"][0]["content"]
     check("forward context contains the answer text", "VISIBLE_ANSWER" in body)
     check("forward context contains ZERO reasoning text", "SECRET_REASONING_TRACE" not in body)
+    # Phase 16: served_model rides meta like reasoning → excluded from context too.
+    check("forward context contains ZERO served_model text", "SERVED_SECRET_X" not in body)
 
     # --- 2. capture is opt-in (mock honours the toggle) ----------------------
     print("2. capture opt-in — reasoning-on provider stamps meta.reasoning; off → absent")
@@ -91,6 +94,11 @@ def main() -> int:
     check("judge turn carries meta.reasoning", bool(judge["meta"].get("reasoning")))
     check("converse turn carries meta.reasoning", bool(conv["meta"].get("reasoning")))
     check("reasoning_kind recorded", panel["meta"].get("reasoning_kind") == "full")
+    # Phase 16: served_model captured + persisted (turns_on is read back from disk).
+    served = providers.provider("mockthink").model
+    check("panel turn carries meta.served_model (persisted, read-back)",
+          panel["meta"].get("served_model") == served)
+    check("converse turn carries meta.served_model", conv["meta"].get("served_model") == served)
 
     off = rooms.create_room("reasoning off", participants=["mock"], judge="mock")
     modes.research(off, "same question", effort="low")
@@ -116,25 +124,26 @@ def main() -> int:
     dp = P("ds", "api", "openai", "deepseek-x", True, "#fff", base_url="https://api.deepseek.com")
     payload = {"system": "", "messages": [{"role": "user", "content": "q"}]}
 
-    rec = _Recorder(_Resp({"choices": [{"message":
+    rec = _Recorder(_Resp({"model": "deepseek-served-z", "choices": [{"message":
           {"content": "DS_ANSWER", "reasoning_content": "DS_THOUGHTS"}}],
           "usage": {"prompt_tokens": 11, "completion_tokens": 7}}))
     openai_style.httpx = rec
-    text, reasoning, usage = openai_style.chat(dp, "k", payload, reasoning=True)
+    text, reasoning, usage, served, _, _ = openai_style.chat(dp, "k", payload, reasoning=True)
     check("openai: thinking enabled in request body", "thinking" in (rec.sent or {}))
     check("openai: captured reasoning_content", text == "DS_ANSWER" and reasoning == "DS_THOUGHTS")
     check("openai: captured exact usage", usage == {"input": 11, "output": 7})
-    text2, reasoning2, _ = openai_style.chat(dp, "k", payload, reasoning=False)
+    check("openai: captured served_model (response.model)", served == "deepseek-served-z")
+    text2, reasoning2, _, _, _, _ = openai_style.chat(dp, "k", payload, reasoning=False)
     check("openai: toggle off → no thinking field, no reasoning",
           "thinking" not in (rec.sent or {}) and reasoning2 is None)
     openai_style.httpx = _httpx
 
     cp = P("cl", "api", "anthropic", "opus", True, "#fff", base_url="https://api.anthropic.com")
-    arec = _Recorder(_Resp({"content": [
+    arec = _Recorder(_Resp({"model": "claude-served-z", "content": [
         {"type": "thinking", "thinking": "CL_SUMMARY"}, {"type": "text", "text": "CL_ANSWER"}],
         "usage": {"input_tokens": 13, "output_tokens": 5}}))
     anthropic_style.httpx = arec
-    atext, areasoning, ausage = anthropic_style.chat(cp, "k", payload, reasoning=True)
+    atext, areasoning, ausage, aserved, _, _ = anthropic_style.chat(cp, "k", payload, reasoning=True)
     check("anthropic: summarized thinking requested",
           (arec.sent or {}).get("thinking", {}).get("display") == "summarized")
     check("anthropic: NO budget_tokens sent (400s on 4.8)",
@@ -142,6 +151,7 @@ def main() -> int:
     check("anthropic: text from text blocks, reasoning from thinking blocks",
           atext == "CL_ANSWER" and areasoning == "CL_SUMMARY")
     check("anthropic: captured exact usage", ausage == {"input": 13, "output": 5})
+    check("anthropic: captured served_model (response.model)", aserved == "claude-served-z")
     anthropic_style.httpx = _httpx
 
     print()

@@ -33,35 +33,91 @@ let STATE = {
   marginOpen: false,
 };
 
-// ===== accent engine (one hue, five derived) ================================
-// Compose oklch(L C H) per role at FIXED lightness/chroma — only the hue varies,
-// so any hue recolours every interactive/selected state coherently. The browser
-// does oklch→screen; no colour math, no lib, no build step.
+// ===== theme mode (dark / light / system) ===================================
+// The accent + text ramps below are INLINE styles on documentElement, so a
+// [data-theme="light"] CSS block would be overridden by them — light surfaces with
+// dark-tuned text/accent. So the single repaint path is applyThemeMode(): it sets
+// data-theme (drives the CSS surface block) AND re-runs both ramps with mode-aware
+// values. currentHue/currentLevel/currentTheme are kept in module scope so any flip
+// (control, OS change) can re-apply. localStorage stays empty — the mode lives in
+// ui.json like accent_hue, applied from the server value on boot.
+let currentHue = 233;          // accent hue (oklch degrees)
+let currentLevel = "default";  // text-brightness step
+let currentTheme = "dark";     // RESOLVED concrete mode (system → dark|light)
+let _mq = null, _mqListener = null;   // single OS-theme listener (system mode only)
+
+function resolveMode(mode) {
+  if (mode === "system") {
+    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  return mode === "light" ? "light" : "dark";
+}
+
+function applyThemeMode(mode) {
+  currentTheme = resolveMode(mode);
+  document.documentElement.dataset.theme = currentTheme;   // drives the CSS surface block
+  applyAccent(currentHue);                                // re-derive inline vars for THIS mode
+  applyBrightness(currentLevel);
+  // live OS-follow ONLY in system mode; hold one ref so listeners never stack.
+  if (_mq && _mqListener) { _mq.removeEventListener("change", _mqListener); _mqListener = null; }
+  if (mode === "system" && window.matchMedia) {
+    _mq = window.matchMedia("(prefers-color-scheme: dark)");
+    _mqListener = () => {
+      currentTheme = _mq.matches ? "dark" : "light";
+      document.documentElement.dataset.theme = currentTheme;
+      applyAccent(currentHue); applyBrightness(currentLevel);
+    };
+    _mq.addEventListener("change", _mqListener);
+  }
+}
+
+// ===== accent engine (one hue, six derived; mode-aware states) ===============
+// Compose oklch(L C H) per role — only the hue varies, so any hue recolours every
+// interactive/selected state coherently. Hue stays user-selectable in both modes;
+// what forks by currentTheme is the state DIRECTION (dark hover lightens / light
+// hover+active darken for contrast on white) and --accent-text's L. --accent /
+// --accent-subtle / --accent-border are shared (the translucent tint reads on
+// either base). The browser does oklch→screen; no colour math, no lib, no build.
 function applyAccent(hue) {
   const h = Number(hue);
   if (Number.isNaN(h)) return;
   const r = document.documentElement.style;
+  const light = currentTheme === "light";
+  const hoverL  = light ? 0.50 : 0.60;   // base 0.55: dark +0.05 / light −0.05
+  const activeL = light ? 0.45 : 0.50;   //            dark −0.05 / light −0.10
+  const textL   = light ? 0.47 : 0.72;   // legible accent text on white vs dark
   r.setProperty("--accent",        `oklch(0.55 0.15 ${h})`);
-  r.setProperty("--accent-hover",  `oklch(0.60 0.15 ${h})`);
-  r.setProperty("--accent-active", `oklch(0.50 0.15 ${h})`);
-  r.setProperty("--accent-text",   `oklch(0.72 0.15 ${h})`);
+  r.setProperty("--accent-hover",  `oklch(${hoverL} 0.15 ${h})`);
+  r.setProperty("--accent-active", `oklch(${activeL} 0.15 ${h})`);
+  r.setProperty("--accent-text",   `oklch(${textL} 0.15 ${h})`);
   r.setProperty("--accent-subtle", `oklch(0.55 0.15 ${h} / 0.16)`);
   r.setProperty("--accent-border", `oklch(0.55 0.15 ${h} / 0.36)`);
 }
 
-// Text brightness — derive the whole grey ramp from ONE top-lightness (same
-// discipline as the accent), so a future light theme slots its own ramp into the
-// same machinery instead of fighting hand-set values. Lower = calmer on dark.
+// Text brightness — derive the whole grey ramp from ONE control, mode-aware.
+// DARK: a top-lightness × fixed proportions (calmer on dark). LIGHT: explicit
+// per-role L rows (near-black primary descending toward white). Same UX (soft /
+// default / crisp), two tables — the ramp-as-function pattern light reuses.
 const BRIGHTNESS_TOP = { soft: 0.82, default: 0.90, crisp: 0.97 };
-const RAMP_STEPS = [1.0, 0.856, 0.649, 0.495];   // primary→quaternary proportions
+const RAMP_STEPS = [1.0, 0.856, 0.649, 0.495];   // dark primary→quaternary proportions
+const LIGHT_RAMP = {   // light per-role L (primary→quaternary), neutral greys
+  crisp:   [0.12, 0.32, 0.51, 0.66],
+  default: [0.13, 0.36, 0.56, 0.71],
+  soft:    [0.20, 0.41, 0.60, 0.74],
+};
 const TEXT_VARS = ["--text-primary", "--text-secondary", "--text-tertiary", "--text-quaternary"];
 function applyBrightness(level) {
-  const top = BRIGHTNESS_TOP[level] ?? BRIGHTNESS_TOP.default;
   const r = document.documentElement.style;
-  TEXT_VARS.forEach((n, i) => r.setProperty(n, `oklch(${(top * RAMP_STEPS[i]).toFixed(3)} 0.012 256)`));
+  if (currentTheme === "light") {
+    const rows = LIGHT_RAMP[level] ?? LIGHT_RAMP.default;
+    TEXT_VARS.forEach((n, i) => r.setProperty(n, `oklch(${rows[i].toFixed(3)} 0.012 256)`));
+  } else {
+    const top = BRIGHTNESS_TOP[level] ?? BRIGHTNESS_TOP.default;
+    TEXT_VARS.forEach((n, i) => r.setProperty(n, `oklch(${(top * RAMP_STEPS[i]).toFixed(3)} 0.012 256)`));
+  }
 }
 
-// Font size — one multiplier the 12–35px ramp is expressed against.
+// Font size — one multiplier the 12–35px ramp is expressed against (mode-independent).
 const FONT_SCALE = { compact: 0.92, default: 1.0, large: 1.12 };
 function applyFontScale(level) {
   document.documentElement.style.setProperty("--font-scale", String(FONT_SCALE[level] ?? 1));
@@ -147,31 +203,122 @@ function renderConverse(t) {
   div.appendChild(whoLine(isHuman ? displayName() : t.speaker, colorOf(isHuman ? "human" : t.speaker), extra));
   const body = document.createElement("div"); body.className = "body";
   renderMd(body, t.text); div.appendChild(body);
-  const rb = reasoningBlock(t); if (rb) div.appendChild(rb);
+  appendTurnFooter(div, t);                 // thinking + model pills, reasoning body below
   const ac = artifactControls(t); if (ac) div.appendChild(ac);
   return div;
 }
 
 function plainPreview(text, n = 160) { return (text || "").replace(/\s+/g, " ").trim().slice(0, n); }
 
-// A collapsed (auto-minimised) "thinking" disclosure for any turn whose meta
-// carries reasoning. Visible only to you — reasoning lives in meta, never in text,
-// so it never flows to another model. Sanitised like all model output.
-function reasoningBlock(t) {
-  const r = t.meta && t.meta.reasoning;
-  if (!r) return null;
-  const summarized = t.meta.reasoning_kind === "summarized";
-  const wrap = el("div", "reasoning");
-  const btn = el("button", "reasoning-toggle");
-  btn.textContent = summarized ? "▸ thinking (summary)" : "▸ thinking";
-  const body = el("div", "reasoning-body hidden"); renderMd(body, r);
-  btn.addEventListener("click", () => {
-    const show = body.classList.contains("hidden");
-    body.classList.toggle("hidden", !show);
-    btn.textContent = (show ? "▾ " : "▸ ") + (summarized ? "thinking (summary)" : "thinking");
-  });
-  wrap.append(btn, body);
-  return wrap;
+// A non-interactive "model" pill: the API-reported served_model, revealed on hover
+// via the native title attribute (attribute/textContent only — never innerHTML, so
+// no parse of an untrusted string). Absent when served_model is. If it disagrees with
+// the header's configured meta.model, a subtle warning tint flags the mismatch.
+function modelPill(t) {
+  const served = t.meta && t.meta.served_model;
+  if (!served) return null;
+  const pill = el("span", "model-pill");
+  pill.textContent = "model";
+  pill.title = served;                                   // hover reveals; safe (attribute)
+  const configured = t.meta && t.meta.model;
+  if (configured && configured !== served) pill.classList.add("mismatch");
+  return pill;
+}
+
+// Flatten + dedupe (by url) a turn's web-search provenance into a single source
+// list. meta.search is grouped by query; meta.citations is the flat in-text set —
+// both feed the disclosure, deduped so the "(N)" count is honest.
+function sourcesOf(meta) {
+  const out = []; const seen = new Set();
+  const push = (s) => { if (s && s.url && !seen.has(s.url)) { seen.add(s.url); out.push(s); } };
+  for (const g of (meta.search || [])) for (const s of (g.sources || [])) push(s);
+  for (const c of (meta.citations || [])) push(c);
+  return out;
+}
+
+// A clickable source link, hardened because the url is web-sourced (untrusted):
+// label via textContent (never innerHTML); href set ONLY after an http/https scheme
+// allowlist (rejects javascript: etc.) with target/rel; blocked links render as
+// plain, non-clickable text.
+function safeLink(url, label) {
+  let ok = false;
+  try { const u = new URL(url, location.href); ok = (u.protocol === "http:" || u.protocol === "https:"); }
+  catch (e) { ok = false; }
+  const a = el("a", "source-link");
+  a.textContent = label || url || "(source)";
+  if (ok) { a.setAttribute("href", url); a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); }
+  else { a.classList.add("blocked"); a.title = "blocked non-http(s) link"; }   // no href → not clickable
+  return a;
+}
+
+// The per-turn footer: a small muted row holding, side by side, the "thinking"
+// toggle, the "model" pill, and a "sources (N)" toggle. Their bodies (reasoning,
+// sources) are returned separately so callers render them FULL-WIDTH below the
+// footer, not width-constrained inside the flex row. The .reasoning-toggle button +
+// .reasoning-body element + click→toggle wiring are kept exactly as named —
+// browser_reasoning keys off both classes. Returns null if the turn has none of them.
+// A non-interactive badge flagging that the answer didn't end cleanly: "length" =
+// the model hit its token ceiling (answer truncated mid-thought); "tool_calls" = it
+// stopped expecting a tool round it never got. A clean "stop" → no badge.
+function truncBadge(meta) {
+  const fr = meta.finish_reason;
+  if (fr !== "length" && fr !== "tool_calls") return null;
+  const b = el("span", "trunc-badge");
+  if (fr === "length") { b.textContent = "⚠ truncated"; b.title = "hit the token ceiling — answer cut off. Raise RESEARCH_ROOM_RESEARCH_MAX_TOKENS."; }
+  else { b.textContent = "⚠ incomplete"; b.title = "stopped on a tool call that wasn't continued."; }
+  return b;
+}
+
+function turnFooterParts(t) {
+  const meta = t.meta || {};
+  const hasReasoning = !!meta.reasoning;
+  const served = meta.served_model;
+  const sources = sourcesOf(meta);
+  const trunc = truncBadge(meta);
+  if (!hasReasoning && !served && !sources.length && !trunc) return null;
+  const footer = el("div", "turn-footer");
+  const bodies = [];
+  if (trunc) footer.append(trunc);                       // truncation flag leads (most important)
+  if (hasReasoning) {
+    const summarized = meta.reasoning_kind === "summarized";
+    const btn = el("button", "reasoning-toggle");
+    btn.textContent = summarized ? "▸ thinking (summary)" : "▸ thinking";
+    const body = el("div", "reasoning-body hidden"); renderMd(body, meta.reasoning);
+    btn.addEventListener("click", () => {
+      const show = body.classList.contains("hidden");
+      body.classList.toggle("hidden", !show);
+      btn.textContent = (show ? "▾ " : "▸ ") + (summarized ? "thinking (summary)" : "thinking");
+    });
+    footer.append(btn); bodies.push(body);               // thinking first…
+  }
+  if (served) footer.append(modelPill(t));               // …then model…
+  if (sources.length) {                                  // …then sources
+    const btn = el("button", "sources-toggle");
+    const label = (n) => `sources (${n})`;
+    btn.textContent = "▸ " + label(sources.length);
+    const body = el("div", "sources-body hidden");
+    for (const s of sources) {
+      const row = el("div", "source-row");
+      row.append(safeLink(s.url, s.title || s.url));
+      if (s.snippet) { const sn = el("div", "source-snippet"); sn.textContent = s.snippet; row.append(sn); }
+      body.append(row);
+    }
+    btn.addEventListener("click", () => {
+      const show = body.classList.contains("hidden");
+      body.classList.toggle("hidden", !show);
+      btn.textContent = (show ? "▾ " : "▸ ") + label(sources.length);
+    });
+    footer.append(btn); bodies.push(body);
+  }
+  return { footer, bodies };
+}
+
+// Append the footer (if any pill/toggle applies) then each full-width body below it.
+function appendTurnFooter(container, t) {
+  const parts = turnFooterParts(t);
+  if (!parts) return;
+  container.appendChild(parts.footer);
+  parts.bodies.forEach((b) => container.appendChild(b));
 }
 
 // Markdown artifact detection — ONE rule: a fenced ```markdown block. On a match,
@@ -236,7 +383,7 @@ function renderRound(b) {
         btn.textContent = showing ? "collapse" : "view full";
       });
       card.appendChild(btn);
-      const rb = reasoningBlock(p); if (rb) card.appendChild(rb);
+      appendTurnFooter(card, p);            // panel provenance: thinking + model
       grid.appendChild(card);
     }
     div.appendChild(grid);
@@ -248,7 +395,7 @@ function renderRound(b) {
     const extra = `synthesis · ${n} panelist${n === 1 ? "" : "s"}` + (ff ? ` · judge fell back from ${ff}` : "");
     syn.appendChild(whoLine(b.judge.speaker, colorOf(b.judge.speaker), extra));
     const body = document.createElement("div"); renderMd(body, b.judge.text); syn.appendChild(body);
-    const rb = reasoningBlock(b.judge); if (rb) syn.appendChild(rb);
+    appendTurnFooter(syn, b.judge);         // synthesis provenance: thinking + model
     const ac = artifactControls(b.judge); if (ac) syn.appendChild(ac);
     div.appendChild(syn);
   }
@@ -742,7 +889,7 @@ function providerCard(p) {
   const grid = el("div", "pgrid"); card.append(grid);
   const actions = el("div", "pcard-actions"); card.append(actions);
   const dl = el("datalist"); dl.id = "dl-" + p.name;
-  let baseInput, modelInput, keyInput, enabledInput, reasoningInput, ctxInput;
+  let baseInput, modelInput, keyInput, enabledInput, reasoningInput, websearchInput, ctxInput;
 
   function buildGrid() {
     grid.innerHTML = "";
@@ -786,6 +933,12 @@ function providerCard(p) {
     rl.append(reasoningInput, document.createTextNode(" show reasoning (best-effort; may add cost)"));
     const rcell = el("div"); rcell.append(rl); grid.append(rcell);
 
+    grid.append(lbl("web search"));
+    websearchInput = el("input"); websearchInput.type = "checkbox"; websearchInput.checked = !!p.web_search;
+    const wl = el("label", "authtoggle");
+    wl.append(websearchInput, document.createTextNode(" search the web on research turns (bills per search)"));
+    const wcell = el("div"); wcell.append(wl); grid.append(wcell);
+
     grid.append(lbl("context window"));
     ctxInput = el("input"); ctxInput.type = "number"; ctxInput.min = "0";
     ctxInput.value = p.context_window || ""; ctxInput.placeholder = "tokens (for the fill gauge)";
@@ -828,6 +981,7 @@ function providerCard(p) {
     save.addEventListener("click", async () => {
       const body = { enabled: enabledInput.checked, auth_mode: localAuth,
                      model: modelInput.value.trim(), reasoning: reasoningInput.checked,
+                     web_search: websearchInput.checked,
                      context_window: parseInt(ctxInput.value, 10) || 0 };
       if (localAuth === "api") {
         body.base_url = baseInput.value.trim();
@@ -912,7 +1066,7 @@ function renderAccentSwatches() {
     b.style.background = `oklch(0.6 0.15 ${h})`;
     b.title = `hue ${h}`;
     b.addEventListener("click", async () => {
-      STATE.ui.accent_hue = h; applyAccent(h); renderAccentSwatches();
+      STATE.ui.accent_hue = h; currentHue = h; applyAccent(h); renderAccentSwatches();
       try { await api("/ui", "PUT", { accent_hue: h }); } catch (e) { /* non-fatal */ }
     });
     box.append(b);
@@ -931,11 +1085,16 @@ function renderSeg(boxId, options, current, onPick) {
   }
 }
 function renderThemeControls() {
+  renderSeg("#thememode-opts",
+    [{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }, { value: "system", label: "System" }],
+    STATE.ui.theme_mode || "dark",
+    async (v) => { STATE.ui.theme_mode = v; applyThemeMode(v); renderThemeControls();
+                   try { await api("/ui", "PUT", { theme_mode: v }); } catch (e) {} });
   renderAccentSwatches();
   renderSeg("#brightness-opts",
     [{ value: "soft", label: "Soft" }, { value: "default", label: "Default" }, { value: "crisp", label: "Crisp" }],
     STATE.ui.text_brightness || "default",
-    async (v) => { STATE.ui.text_brightness = v; applyBrightness(v); renderThemeControls();
+    async (v) => { STATE.ui.text_brightness = v; currentLevel = v; applyBrightness(v); renderThemeControls();
                    try { await api("/ui", "PUT", { text_brightness: v }); } catch (e) {} });
   renderSeg("#fontsize-opts",
     [{ value: "compact", label: "Compact" }, { value: "default", label: "Default" }, { value: "large", label: "Large" }],
@@ -993,9 +1152,14 @@ $("#add-btn").addEventListener("click", async () => {
   try {
     STATE.ui = await api("/ui");
     applyUI();
-    applyAccent(STATE.ui.accent_hue);            // reconstruct the theme from the server
-    applyBrightness(STATE.ui.text_brightness);
+    // reconstruct the theme from the server. Seed the module-scope ramp inputs, then
+    // applyThemeMode() is the SINGLE repaint entry — it sets data-theme and re-runs
+    // applyAccent + applyBrightness with mode-aware values (don't call them directly
+    // here, or mode-aware output would be applied and then clobbered).
+    currentHue = Number(STATE.ui.accent_hue) || 233;
+    currentLevel = STATE.ui.text_brightness || "default";
     applyFontScale(STATE.ui.font_scale);
+    applyThemeMode(STATE.ui.theme_mode || "dark");
     const part = await api("/participants");
     STATE.participants = part.participants || [];
     STATE.globalJudge = part.research_judge || "";

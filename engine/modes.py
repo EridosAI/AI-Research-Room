@@ -40,7 +40,8 @@ def _panelist(speaker: str, blind_payload: dict, effort: str):
     """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
     a failure becomes an absence, captured for the judge prompt."""
     try:
-        reply = providers.call_model(speaker, blind_payload, tools=True, effort=effort)
+        reply = providers.call_model(speaker, blind_payload, tools=True, effort=effort,
+                                     max_tokens=settings.RESEARCH_MAX_TOKENS)
         if not reply.text.strip():
             return speaker, None, "empty answer"
         return speaker, reply, None
@@ -49,9 +50,10 @@ def _panelist(speaker: str, blind_payload: dict, effort: str):
 
 
 def _reply_meta(reply) -> dict:
-    """meta fields carried from a reply: reasoning (best-effort) + token usage.
-    Both live on the turn's meta, never in text — so build_context never re-sends
-    them to a model."""
+    """meta fields carried from a reply: reasoning (best-effort), token usage, and the
+    API-reported served_model. All live on the turn's meta, never in text — so
+    build_context never re-sends them to a model. One helper → every call site (panel,
+    judge, converse) gets served_model with no further change."""
     m: dict = {}
     if getattr(reply, "reasoning", None):
         m["reasoning"] = reply.reasoning
@@ -59,6 +61,16 @@ def _reply_meta(reply) -> dict:
             m["reasoning_kind"] = reply.reasoning_kind
     if getattr(reply, "usage", None):
         m["usage"] = reply.usage
+    if getattr(reply, "served_model", None):
+        m["served_model"] = reply.served_model
+    s = getattr(reply, "search", None)
+    if s:
+        if s.get("searches"):
+            m["search"] = s["searches"]
+        if s.get("citations"):
+            m["citations"] = s["citations"]
+    if getattr(reply, "finish_reason", None):
+        m["finish_reason"] = reply.finish_reason
     return m
 
 
@@ -154,9 +166,11 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
 
 def _call_judge(judge: str, payload: dict, effort: str):
     try:
-        return providers.call_model(judge, payload, tools=True, effort=effort)
+        return providers.call_model(judge, payload, tools=True, effort=effort,
+                                    max_tokens=settings.RESEARCH_MAX_TOKENS)
     except providers.RunnerUnavailable:
-        return providers.call_model(judge, payload, tools=False)
+        return providers.call_model(judge, payload, tools=False,
+                                    max_tokens=settings.RESEARCH_MAX_TOKENS)
 
 
 # ---- converse ---------------------------------------------------------------

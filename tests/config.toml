@@ -44,6 +44,23 @@ enabled   = false
 reasoning = true
 color     = "#fbcfe8"
 
+[providers.mocksearch]    # mock that emits a web-search trace (toggle on) — for Phase 17 tests.
+auth_mode  = "api"        # disabled by default so it stays out of enabled() and other
+backend    = "mock"       # tests; the web-search tests add it to a room's roster explicitly.
+model      = "mocksearch-1"
+enabled    = false
+web_search = true
+color      = "#86efac"
+
+[providers.grok_proxy]    # Grok via the Hermes xAI-OAuth proxy (Phase 19) — openai-compatible,
+auth_mode  = "api"        # localhost sidecar. Disabled by default; the phase-19 test stubs httpx.
+backend    = "openai"
+base_url   = "http://127.0.0.1:8645/v1"
+model      = "grok-4.3"
+enabled    = false
+reasoning  = true
+color      = "#c4b5fd"
+
 [providers.deepseek]      # real provider for the live cheap call
 auth_mode = "api"
 backend   = "openai"

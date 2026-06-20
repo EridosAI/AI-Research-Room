@@ -55,10 +55,25 @@ Two layers, cleanly split:
   as agreement); a round aborts only if everyone fails. If the **judge** is unavailable it
   falls back to a panelist that answered, so a bad judge can't sink a good round.
 - **Visible reasoning (opt-in, best-effort).** Flip "show reasoning" on a provider and its
-  answers carry the model's reasoning, shown as a collapsed "thinking" disclosure under the
-  answer. It's stored on the turn's `meta`, which `build_context` never serializes — so
+  answers carry the model's reasoning, shown as a collapsed "thinking" disclosure in the turn's
+  footer. It's stored on the turn's `meta`, which `build_context` never serializes — so
   reasoning is visible only to you and **never re-sent to another model** (also required:
   some APIs reject replayed reasoning). Providers that don't expose it simply contribute none.
+- **Served-model provenance.** Beside "thinking" sits a non-interactive **model** pill carrying
+  `meta.served_model` — what the API *reported* serving the turn (`response.model`), distinct from
+  the *configured* model in the header. They're usually equal; when they differ the mismatch is
+  recorded and the pill tints (the model's prose can lie about its identity, `response.model`
+  can't). It rides `meta` like reasoning, so it's excluded from forward context too; the Grok-CLI
+  path reports none, so the pill just doesn't show.
+- **Web search (opt-in, per provider).** Flip "web search" on a provider and its **research**
+  panelists search the web server-side while answering — Claude's native `web_search` tool, or
+  OpenRouter's `web_search` server tool for anything routed through OpenRouter (Grok already
+  searches via its CLI runner). Search is **independent per panelist** (separate result pools,
+  common scope — divergent exploration is the point), not a shared retrieval layer. Sources land in
+  `meta.search` and surface as a collapsed **"sources (N)"** disclosure in the turn footer (links
+  scheme-allowlisted to http/https); like reasoning, the trace never re-enters forward context.
+  Off by default — search bills per call, so an N-panelist round costs N× search. Converse stays
+  no-search.
 - **Obsidian export (opt-in).** Set an export folder and every room renders a read-only `.md`
   there after each turn — the filtered, foregrounded view (syntheses up top, raw panel
   answers in a collapsed callout, margin excluded) with YAML frontmatter (room, date,
@@ -67,15 +82,19 @@ Two layers, cleanly split:
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.
-- **Linear-aesthetic theme.** Depth from stacked lighter surfaces (not outlines), a single
-  derived accent (one hue → five oklch roles, user-selectable in settings and persisted to
-  `ui.json`), and local **Inter** (vendored woff2, no CDN — works offline). All colour routes
-  through CSS custom properties; speaker-dot identity colours are the one deliberate exception.
+- **Linear-aesthetic theme, dark + light.** Depth from stacked lighter surfaces (not outlines) in
+  dark, and from shadow over white surfaces in **light** — a `dark / light / system` switch
+  (`system` follows the OS live). A single derived accent (one hue → six oklch roles, user-selectable
+  and persisted to `ui.json`) recolours every state; the accent's hover/press direction and text
+  lightness fork by mode so any hue stays legible on either base. Local **Inter** (vendored woff2, no
+  CDN — works offline). All colour routes through CSS custom properties (surfaces in a
+  `[data-theme="light"]` block, the text + accent ramps set in JS so they track the active mode);
+  speaker-dot identity colours are the one deliberate exception.
 - **Settings home + theming.** ⚙ settings is a tabbed panel (Providers / Theme / Data). Theme
-  offers accent, **text brightness** (one input derives the whole grey ramp — calms text on the
-  dark surfaces), **font size** (a `--font-scale` multiplier), a **display name** the app (and the
-  models, via context) address you by, and **token-chip toggles** (token estimate / model %).
-  All persist to `ui.json` and survive reload.
+  offers **mode** (dark / light / system), accent, **text brightness** (one input derives the whole
+  grey ramp, mode-aware), **font size** (a `--font-scale` multiplier), a **display name** the app
+  (and the models, via context) address you by, and **token-chip toggles** (token estimate / model
+  %). All persist to `ui.json` and survive reload.
 - **Markdown artifacts.** When a model emits a fenced ` ```markdown ` block, the answer shows
   **copy** (raw `.md` → clipboard) and **save** (→ a configured artifacts folder, collision-safe
   name); auto-written on detection when the folder is set. Markdown only — no execution, one rule.
@@ -129,12 +148,34 @@ verbatim; the adapter appends `/chat/completions` (openai) or `/v1/messages` (an
 it never injects `/v1`, so a base already ending in `/v1` isn't doubled. `research_judge`
 names the default synthesizer (each room may override it). Each provider also has a **show
 reasoning** toggle (default off) — on, the engine captures that model's reasoning where the
-backend offers it (DeepSeek's `reasoning_content`, Claude's summarized thinking).
+backend offers it (DeepSeek's `reasoning_content`, Claude's summarized thinking) — and a **web
+search** toggle (default off) — on, research panelists search the web server-side (Claude's
+`web_search` tool, or OpenRouter's for OR-routed models). Both bill per use, hence off by default.
 
 **Set keys through the web UI** (write-only masked field) or drop them into
 `~/.config/research-room/secrets.json`. Env vars are honored as a fallback:
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `MOONSHOT_API_KEY`, `DEEPSEEK_API_KEY`.
 For Grok-on-subscription, keep `XAI_API_KEY` **unset** so it uses the CLI's own auth.
+
+### Optional: Grok via the Hermes OAuth proxy (genuine grok-4.3, free at the margin)
+
+Instead of the CLI Grok runner, you can run [Hermes Agent](https://github.com/NousResearch/hermes-agent)'s
+local OpenAI-compatible proxy as a **sidecar** and treat Grok as an ordinary `openai` provider —
+which means the served-model pill, reasoning capture, usage and finish_reason all work, and the
+seat is a real **grok-4.3** reasoner rather than the CLI's coding-tuned default.
+
+```bash
+hermes proxy start --provider xai --host 127.0.0.1 --port 8645   # background sidecar; OAuth attached
+```
+Then add a provider (⚙ settings → Providers): `backend = openai`, `base_url = http://127.0.0.1:8645/v1`,
+`model = grok-4.3`, **any** dummy key (the proxy authenticates via your SuperGrok OAuth, stored and
+auto-refreshed in `~/.hermes/auth.json` — Fusion holds no Grok secret). Flip **show reasoning** on to
+surface Grok's `reasoning_content`. Fusion doesn't manage the proxy's lifecycle — if it's down, that
+Grok seat just degrades to an absent panelist. This is a **personal** convenience and never ships in
+the template; a friend instead drops in a key-based Grok row (an xAI key, or OpenRouter) — same
+`openai` backend, zero code difference. The CLI runner (`run_grok*.sh`) still works and is superseded,
+not removed. (Note: xAI-native web search does **not** traverse the proxy — see [DEFERRED.md](DEFERRED.md);
+for Grok-with-search in research rounds use an OpenRouter-routed Grok seat.)
 
 ---
 
@@ -233,7 +274,7 @@ pip install playwright && playwright install chromium     # dev only
 
 python tests/engine_phase8.py          # rooms as folders: isolation, migration, CLI round
 python tests/engine_phase10.py         # margin isolation + windowed background + promote
-python tests/engine_phase11.py         # reasoning isolation + opt-in capture + adapter capture
+python tests/engine_phase11.py         # reasoning + served_model: isolation + opt-in capture + adapter capture
 python tests/browser_phase6.py         # composite render, view-full, sanitization, fail-closed
 python tests/browser_phase7.py         # key round-trip, cli toggle, /test+/models, secrets loop
 python tests/browser_phase8.py         # per-round model picker + judge fallback
@@ -248,13 +289,27 @@ python tests/browser_phase13.py        # theme tokens + accent engine/persistenc
 python tests/browser_phase14.py        # settings tabs + brightness/font/display-name + scrollbar
 python tests/engine_artifacts.py       # markdown-artifact detection + collision-safe save
 python tests/browser_phase14b.py       # chip toggles + model % + artifact copy/save + hover preview
+python tests/browser_phase15.py        # dark/light/system mode: surface + ramp fork, persist, dark unchanged
+python tests/browser_phase16.py        # served-model 'model' pill beside thinking + absence/mismatch guard
+python tests/engine_phase17.py         # web search: adapter attach/capture + meta.search isolation + e2e
+python tests/browser_phase17.py        # 'sources (N)' disclosure + http(s) link allowlist
+RR_LIVE=1 python tests/live_phase17.py # OPT-IN, billed: confirm live Anthropic/OpenRouter search shapes
+python tests/engine_phase18.py         # research token ceiling + finish_reason capture/normalization
+python tests/browser_phase18.py        # ⚠ truncated/incomplete badge keyed off finish_reason
+python tests/engine_phase19.py         # Grok-via-proxy provider parses through the existing adapter
 ```
 
 ## Environment
 
 `RESEARCH_ROOM_VAULT` (rooms dir), `RESEARCH_ROOM_HOME` / `RESEARCH_ROOM_SECRETS` (secrets
 location), `RESEARCH_ROOM_CONFIG` (registry path), `RESEARCH_ROOM_UI` (sidebar-state file),
-`RESEARCH_ROOM_HOST` / `RESEARCH_ROOM_PORT`, `RESEARCH_ROOM_MAX_TOKENS`.
+`RESEARCH_ROOM_HOST` / `RESEARCH_ROOM_PORT`, `RESEARCH_ROOM_MAX_TOKENS` (converse/margin output
+cap, default 8192), `RESEARCH_ROOM_RESEARCH_MAX_TOKENS` (research panelist + judge output cap,
+default 32768 — far larger because syntheses and agentic web-search answers run long).
+
+When an answer is cut off (hit the token ceiling, or stopped on an unfinished tool round), the
+turn's footer shows a **⚠ truncated / ⚠ incomplete** badge — the engine records `finish_reason`
+on every API turn, so a clipped answer is flagged, never silently shown as if complete.
 
 ## License
 

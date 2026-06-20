@@ -67,6 +67,10 @@ def margin_turn(room_id: str, prompt: str, window: str = "last_3",
         meta["reasoning"] = reply.reasoning
         if reply.reasoning_kind:
             meta["reasoning_kind"] = reply.reasoning_kind
+    if reply.served_model:
+        meta["served_model"] = reply.served_model   # provenance kept consistent with main
+    if reply.finish_reason:
+        meta["finish_reason"] = reply.finish_reason
     transcript.append(transcript.make_turn(
         "margin", "ai", model, reply.text, meta), mpath)
     return reply.text

@@ -21,6 +21,13 @@ from .adapters import anthropic_style, openai_style
 
 DEFAULT_JUDGE = "claude"
 
+# Connection-test output budget. Must clear reasoning models' minimum: GPT-5.x
+# (and others) route to a Responses API where `max_tokens`→`max_output_tokens` and
+# hidden reasoning tokens come out of that budget, so the API floors it at 16. A
+# 1-token ping 400s ("integer_below_min_value"). 32 = comfortably above the floor,
+# still a cheap ping (the test only checks the call succeeds, not the content).
+TEST_MAX_TOKENS = 32
+
 
 class RunnerUnavailable(Exception):
     """A cli provider was asked to run but its runner/CLI isn't available."""
@@ -38,6 +45,7 @@ class Provider:
     runner: str | None = None        # cli providers: research panelist runner
     converse_runner: str | None = None  # cli providers: converse-turn runner
     reasoning: bool = False  # opt-in: capture this provider's reasoning (cost/latency)
+    web_search: bool = False  # opt-in: attach server-side web search on tools=True calls (bills per search)
     context_window: int = 0  # token window for the fill gauge; 0 = unknown (you set it)
 
 
@@ -47,11 +55,17 @@ class ModelReply:
     provider's reasoning toggle is on AND the backend surfaced it. It is stored on
     the turn's meta (never in `text`), so it never re-enters forward context.
     `usage` is {input, output, exact}: exact from an API usage block, else an
-    estimate (cli/mock) — exact=False signals the UI to mark it with a ~."""
+    estimate (cli/mock) — exact=False signals the UI to mark it with a ~.
+    `served_model` is what the API REPORTED serving (response.model) — distinct from
+    the configured `meta.model`; when they differ, the mismatch is now recorded. It
+    rides the turn's meta like reasoning, so it never re-enters forward context."""
     text: str
     reasoning: str | None = None
     reasoning_kind: str | None = None   # "summarized" | "full"
     usage: dict | None = None
+    served_model: str | None = None     # API-reported model (response.model); None = unreported (cli)
+    search: dict | None = None          # web-search provenance: {"searches": [...], "citations": [...]} or None
+    finish_reason: str | None = None    # canonical: stop | length (truncated) | tool_calls | content_filter
 
 
 # ---- registry load / write-back ---------------------------------------------
@@ -79,6 +93,7 @@ def _load() -> None:
             runner=d.get("runner"),
             converse_runner=d.get("converse_runner"),
             reasoning=bool(d.get("reasoning", False)),
+            web_search=bool(d.get("web_search", False)),
             context_window=int(d.get("context_window", 0) or 0),
         )
     _registry = reg
@@ -154,7 +169,8 @@ def research_judge() -> str:
 def update_provider(name: str, *, base_url: str | None = None, model: str | None = None,
                     enabled: bool | None = None, auth_mode: str | None = None,
                     backend: str | None = None, display_name: str | None = None,
-                    reasoning: bool | None = None, context_window: int | None = None) -> None:
+                    reasoning: bool | None = None, web_search: bool | None = None,
+                    context_window: int | None = None) -> None:
     if name not in _raw.get("providers", {}):
         raise ValueError(f"unknown provider '{name}'")
     p = _raw["providers"][name]
@@ -172,6 +188,8 @@ def update_provider(name: str, *, base_url: str | None = None, model: str | None
         p["display_name"] = display_name
     if reasoning is not None:
         p["reasoning"] = bool(reasoning)
+    if web_search is not None:
+        p["web_search"] = bool(web_search)
     if context_window is not None:
         p["context_window"] = int(context_window)
     _save()
@@ -235,6 +253,22 @@ def _mock_text(p: Provider, payload: dict) -> str:
     return f"[mock:{p.key}/{p.model}] {snippet}"
 
 
+def _mock_search(p: Provider) -> dict:
+    """Deterministic, no-network web-search trace for offline tests. Includes one
+    http(s) source and one javascript: URL so the UI's link allowlist is exercised
+    (mirrors how the mock honours the reasoning/served-model paths)."""
+    sources = [
+        {"url": "https://example.com/a", "title": f"{p.key}: Example Source A",
+         "snippet": "A deterministic snippet for the sources disclosure."},
+        {"url": "javascript:alert(1)", "title": "Unsafe link (must be blocked)"},
+    ]
+    return {
+        "searches": [{"query": f"{p.key} background research", "sources": sources}],
+        "citations": [{"url": "https://example.com/a", "title": f"{p.key}: Example Source A",
+                       "cited_text": "deterministic snippet"}],
+    }
+
+
 def _estimate_usage(payload: dict, text: str) -> dict:
     """Cheap, tokenizer-agnostic token estimate (~chars/4) for paths with no usage
     block (cli/mock). Marked exact=False so the UI shows it with a ~."""
@@ -275,7 +309,7 @@ def _cli_call(p: Provider, payload: dict, tools: bool, effort: str) -> str:
 
 
 def call_model(provider_key: str, payload: dict, tools: bool = False,
-               effort: str = "medium") -> ModelReply:
+               effort: str = "medium", max_tokens: int | None = None) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -283,28 +317,39 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     ModelReply.reasoning; otherwise it's None. cli/mock contribute none (except
     the mock honours the toggle so the capture path is testable offline).
 
-    Note: tools=True only actually searches on the cli (Grok) path. On the api
-    adapters it's currently a no-op (per-provider web-search tools not yet wired),
-    so api panelists answer from parametric knowledge.
+    Web search is attached server-side on tools=True calls when the provider's
+    `web_search` toggle is on (anthropic web_search tool / OpenRouter web_search
+    server tool); the provider runs the search→answer loop and returns in one call.
+    The cli (Grok) path searches via its own agentic runner regardless of the flag.
+    With the flag off the api request is byte-identical to a plain chat call.
     """
     p = provider(provider_key)
+    do_search = bool(tools and p.web_search)
     if p.backend == "mock":
         text = _mock_text(p, payload)
         rsn = (f"[mock reasoning · {p.key}] step 1 … step 2 … therefore." if p.reasoning else None)
-        return ModelReply(text, rsn, "full" if rsn else None, _estimate_usage(payload, text))
+        # mock echoes its configured model as the "served" one — gives the provenance
+        # path a value to render/assert offline (mirrors the reasoning toggle).
+        return ModelReply(text, rsn, "full" if rsn else None,
+                          _estimate_usage(payload, text), served_model=p.model,
+                          search=(_mock_search(p) if do_search else None),
+                          finish_reason="stop")
     if p.auth_mode == "cli":
-        text = _cli_call(p, payload, tools, effort)               # cli surfaces no trace/usage
-        return ModelReply(text, usage=_estimate_usage(payload, text))
+        text = _cli_call(p, payload, tools, effort)               # cli surfaces no trace/usage/model
+        return ModelReply(text, usage=_estimate_usage(payload, text))   # served/search/finish stay None
     # api
     key = secrets.get(provider_key)
     if p.backend == "anthropic":
-        text, reasoning, raw = anthropic_style.chat(p, key, payload, reasoning=p.reasoning)
+        text, reasoning, raw, served, search, finish = anthropic_style.chat(
+            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens)
         kind = "summarized" if reasoning else None
     else:
-        text, reasoning, raw = openai_style.chat(p, key, payload, reasoning=p.reasoning)
+        text, reasoning, raw, served, search, finish = openai_style.chat(
+            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens)
         kind = "full" if reasoning else None
     usage = ({**raw, "exact": True} if raw else _estimate_usage(payload, text))
-    return ModelReply(text, reasoning, kind, usage)
+    return ModelReply(text, reasoning, kind, usage, served_model=served,
+                      search=search, finish_reason=finish)
 
 
 def list_models(provider_key: str) -> list[str]:
@@ -320,7 +365,9 @@ def list_models(provider_key: str) -> list[str]:
 
 
 def test_provider(provider_key: str) -> dict:
-    """1-token / single-reply connection test → {"ok": bool, "error"?: str}.
+    """Single-reply connection test → {"ok": bool, "error"?: str}. Uses a small
+    reasoning-safe output budget (TEST_MAX_TOKENS), not 1 — a 1-token ping 400s on
+    reasoning models (GPT-5.x via OpenRouter/Azure floor max_output_tokens at 16).
     Never raises; adapter errors are already key-redacted."""
     p = provider(provider_key)
     payload = {"system": "", "messages": [{"role": "user", "content": "ping"}]}
@@ -334,7 +381,7 @@ def test_provider(provider_key: str) -> dict:
             if not key:
                 return {"ok": False, "error": "no API key configured"}
             adapter = anthropic_style if p.backend == "anthropic" else openai_style
-            adapter.chat(p, key, payload, max_tokens=1)
+            adapter.chat(p, key, payload, max_tokens=TEST_MAX_TOKENS)
         return {"ok": True}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}

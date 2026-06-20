@@ -123,6 +123,7 @@ class UIBody(BaseModel):
     sidebar_width: float | None = None
     export_dir: str | None = None   # Obsidian export folder; "" = off
     accent_hue: float | None = None   # theme accent hue (oklch degrees)
+    theme_mode: str | None = None     # dark | light | system
     text_brightness: str | None = None   # soft | default | crisp
     font_scale: str | None = None        # compact | default | large
     display_name: str | None = None      # how the app addresses you; "" = human
@@ -156,6 +157,7 @@ class ProviderUpdate(BaseModel):
     enabled: bool | None = None
     auth_mode: str | None = None
     reasoning: bool | None = None
+    web_search: bool | None = None
     context_window: int | None = None
     api_key: str | None = None   # write-only; never returned
 
@@ -195,6 +197,7 @@ def _provider_view(name: str, p: providers.Provider) -> dict:
         "runner": p.runner,
         "color": p.color,
         "reasoning": p.reasoning,
+        "web_search": p.web_search,
         "context_window": p.context_window,
         "key_last4": None if p.auth_mode == "cli" else secrets.last4(name),
         "status": _status(name, p),
@@ -292,6 +295,7 @@ def _maybe_artifacts(room_id: str, text: str) -> None:
 
 _UI_DEFAULT = {"sidebar_collapsed": False, "sidebar_width": 260, "export_dir": "",
                "accent_hue": 233,            # navy default
+               "theme_mode": "dark",         # dark (default) | light | system
                "text_brightness": "default", "font_scale": "default", "display_name": "",
                "show_token_estimate": True, "show_model_pct": False, "artifacts_dir": ""}
 
@@ -535,7 +539,7 @@ def put_provider(name: str, body: ProviderUpdate) -> dict:
             providers.update_provider(
                 name, base_url=body.base_url, model=body.model,
                 enabled=body.enabled, auth_mode=body.auth_mode, reasoning=body.reasoning,
-                context_window=body.context_window)
+                web_search=body.web_search, context_window=body.context_window)
         except ValueError as e:
             raise HTTPException(404, str(e)) from e
         if body.api_key is not None:           # write-only; "" clears

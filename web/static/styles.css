@@ -44,6 +44,14 @@
   --scrim: rgba(0, 0, 0, 0.6);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.5);
 
+  /* elevation shadows — DARK distinguishes depth by surface shade, so it needs no
+     shadow: these are `none` and the surfaces that lift in light are byte-identical
+     in dark. The [data-theme="light"] block fills them in (light collapses elevated
+     surfaces to white and lifts them by shadow instead). */
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+
   /* scrollbar — track blends into the surface; only the thumb shows, lighter */
   --scrollbar-thumb: rgba(255, 255, 255, 0.11);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
@@ -63,6 +71,47 @@
 
   /* spacing — 4px grid */
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px;
+}
+
+/* ============================================================================
+   LIGHT theme — CSS-resident tokens only. Surfaces invert dark's MECHANISM: dark
+   reads elevation by surface lightness (deeper = lighter); light keeps content and
+   floating surfaces WHITE and lifts them by SHADOW, with only the chrome stepping
+   greyer. The text ramp and --accent-* are NOT here — they're inline styles set by
+   applyBrightness()/applyAccent() in app.js (a CSS block would be overridden), and
+   fork by mode there (15.3). :root stays the dark default so dark is unchanged and
+   a JS failure falls back to a sane dark theme.
+   ============================================================================ */
+[data-theme="light"] {
+  /* surfaces — white base; chrome greyer, content + floating stay white (lift by shadow) */
+  --bg-primary:   #FFFFFF;   /* app base / code blocks */
+  --bg-secondary: #F9F9FB;   /* main transcript column */
+  --bg-tertiary:  #F0F1F4;   /* sidebar, chat bubbles, round container, buttons, inputs */
+  --bg-elevated:  #FFFFFF;   /* panels, popovers, disclosures — white, lifted by shadow */
+  --bg-modal:     #FFFFFF;   /* modal — white + shadow */
+  --surface-hover:  rgba(0, 0, 0, 0.04);
+  --surface-active: rgba(0, 0, 0, 0.07);
+
+  /* borders — low-alpha black hairlines */
+  --border-subtle:  rgba(0, 0, 0, 0.06);
+  --border-default: rgba(0, 0, 0, 0.10);
+  --border-strong:  rgba(0, 0, 0, 0.16);
+
+  /* semantic — darkened for white-surface contrast */
+  --success: #3E9B6E;
+  --warning: #C99A00;
+  --error:   #D63B3B;
+  --error-bg: rgba(214, 59, 59, 0.10);
+
+  /* scrollbar — black-alpha thumb on a white track */
+  --scrollbar-thumb: rgba(0, 0, 0, 0.20);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.34);
+
+  /* shadows — light's elevation cue (dark leaves these `none`) */
+  --shadow-sm: 0 1px 2px  rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.14);
+  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.14);   /* overrides the dark modal shadow */
 }
 
 /* local Inter (vendored woff2 — no CDN, works offline) */
@@ -159,7 +208,7 @@ input, textarea { color: var(--text-primary); }
 .round .prompt .who { font-weight: var(--weight-semibold); font-size: var(--text-xs); }
 .round .prompt .body { margin: 4px 0 14px; }
 .round .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 14px; }
-.panel { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 12px; }
+.panel { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 12px; box-shadow: var(--shadow-md); }
 .panel .phead { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .panel .pname { font-weight: var(--weight-semibold); font-size: var(--text-sm); }
 .badge { font-size: 10.5px; padding: 1px 6px; border-radius: var(--radius-full); border: 1px solid var(--border-default); color: var(--text-tertiary); }
@@ -173,9 +222,23 @@ input, textarea { color: var(--text-primary); }
 /* markdown artifacts (copy / save controls under a detected spec) */
 .artifacts { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 .artifact { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-  background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm); }
 .artifact-label { font-size: var(--text-xs); color: var(--text-secondary); margin-right: auto; }
 .artifact-btn { font-size: 11.5px; padding: 2px 9px; }
+
+/* per-turn footer — small muted row of pills (thinking toggle + model pill) under
+   the body; the reasoning body renders full-width BELOW this row, not inside it */
+.turn-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+
+/* model provenance pill — non-interactive; served model on hover (title attr) */
+.model-pill { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary); cursor: default;
+  background: transparent; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); }
+.model-pill.mismatch { color: var(--warning); border-color: var(--warning); }
+
+/* truncation flag — answer didn't end cleanly (token ceiling / unfinished tool round) */
+.trunc-badge { font-size: 11.5px; padding: 2px 8px; cursor: default; border-radius: var(--radius-md);
+  color: var(--warning); border: 1px solid var(--warning); background: transparent; }
 
 /* reasoning disclosure (collapsed by default) — dashed affordance, elevated body */
 .reasoning { margin-top: 8px; }
@@ -183,7 +246,20 @@ input, textarea { color: var(--text-primary); }
   background: transparent; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); }
 .reasoning-toggle:hover { border-color: var(--accent); color: var(--text-primary); }
 .reasoning-body { margin-top: 6px; padding: 8px 12px; font-size: var(--text-sm); color: var(--text-secondary);
-  background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm); }
+
+/* sources disclosure (web-search provenance) — toggle in the footer, body below */
+.sources-toggle { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary);
+  background: transparent; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); }
+.sources-toggle:hover { border-color: var(--accent); color: var(--text-primary); }
+.sources-body { margin-top: 6px; padding: 8px 12px; font-size: var(--text-sm);
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 8px; }
+.source-row { display: flex; flex-direction: column; gap: 2px; }
+.source-link { color: var(--accent-text); word-break: break-word; }
+.source-link.blocked { color: var(--text-quaternary); text-decoration: line-through; cursor: not-allowed; }
+.source-snippet { font-size: var(--text-xs); color: var(--text-tertiary); }
 
 /* markdown */
 .md p { margin: .4em 0; }
@@ -213,7 +289,7 @@ input, textarea { color: var(--text-primary); }
 .seg { display: inline-flex; gap: 4px; }
 .seg button { padding: 4px 11px; font-size: var(--text-xs); }
 .seg button.sel { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--text-primary); }
-.pcard { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 12px; margin-bottom: 10px; background: var(--bg-elevated); }
+.pcard { border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 12px; margin-bottom: 10px; background: var(--bg-elevated); box-shadow: var(--shadow-sm); }
 .pcard-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .pcard-name { font-weight: var(--weight-semibold); }
 .adapter-tag { font-size: 10.5px; color: var(--text-tertiary); border: 1px solid var(--border-default); border-radius: var(--radius-full); padding: 1px 6px; }
@@ -305,9 +381,11 @@ input, textarea { color: var(--text-primary); }
 #input { flex: 1; resize: vertical; background: var(--bg-tertiary); color: var(--text-primary);
   border: 1px solid var(--border-default); border-radius: var(--radius-lg); padding: 9px 11px; }
 #input:focus, #margin-input:focus, .pgrid input:focus, .add-grid input:focus { outline: none; border-color: var(--accent); }
-#send-btn { align-self: stretch; padding: 0 22px; background: var(--accent); color: var(--text-primary);
+/* text sits on the SATURATED accent fill in both modes, so it's a stable light tone,
+   not --text-primary (which goes near-black in light → unreadable on the accent). */
+#send-btn { align-self: stretch; padding: 0 22px; background: var(--accent); color: #f7f8f8;
   border-color: var(--accent); font-weight: var(--weight-semibold); }
-#send-btn:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--text-primary); }
+#send-btn:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: #f7f8f8; }
 .status { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: 6px; min-height: 16px; }
 .status.busy { color: var(--accent-text); }
 .spinner { display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px;
