@@ -100,20 +100,11 @@ def main():
             assert all(f.suffix == ".md" for f in adir.iterdir()), "non-.md produced"
             print(f"14D OK: copy → clipboard, save → {saved[0].name}")
 
-            # --- 14C: chip toggles + model % ---
-            page.click("#providers-btn")
-            page.wait_for_selector('.pcard[data-name="mock"]')
-            page.click('.tab[data-tab="theme"]')
-            page.check("#chip-pct")
-            page.wait_for_timeout(150)
-            assert "%" in page.locator("#token-bar").inner_text(), "model % not shown when toggled on"
-            assert _json("/ui")["show_model_pct"] is True, "model % toggle not persisted"
-            page.uncheck("#chip-tokens")
-            page.wait_for_timeout(150)
-            bar = page.locator("#token-bar").inner_text()
-            assert "/" not in bar.split("session")[0], f"token estimate still shown after toggle off: {bar!r}"
-            assert _json("/ui")["show_token_estimate"] is False, "token-estimate toggle not persisted"
-            print(f"14C OK: chip pieces toggle + persist ({bar.splitlines()[0]!r})")
+            # --- 14C superseded by Phase 20: the chip toggles folded into the model-square bar ---
+            assert page.locator("#chip-pct").count() == 0, "chip-% toggle should be gone (folded into the bar)"
+            assert page.locator("#chip-tokens").count() == 0, "chip-tokens toggle should be gone"
+            assert page.locator("#token-bar .model-square").count() >= 1, "model-square bar missing per-model tile"
+            print("14C OK: per-model chips folded into the Phase-20 model-square bar (% in the popover)")
             b.close()
         print("\nPHASE 14 C/D/E (chip toggles + artifacts + hover preview): ALL CHECKS PASS")
     finally:

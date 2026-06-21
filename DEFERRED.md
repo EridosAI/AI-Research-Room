@@ -36,6 +36,25 @@ difference. Current architecture is in [README.md](README.md); the build record 
   persists in `ui.json`; localStorage stays empty. See
   [BUILD_amendment_phase15.md](BUILD_amendment_phase15.md).
 
+## File features ladder (Phase 22 shipped the first rung)
+
+Phase 22 shipped **inline file drop** — drop/pick a `.md` / `.txt` into the composer → a file-turn the
+panel reads (content *is* the turn text; converse gets it via `build_context`, research threads it into
+the blind payload). See [BUILD_amendment_phase22.md](BUILD_amendment_phase22.md). The rest of the ladder:
+
+- **More text formats.** The allowlist (`modes.TEXT_EXTS` + the JS `FILE_EXTS`) is `.md`/`.txt` only;
+  any `readAsText`-able format (code, `.json`, `.csv`, …) is a trivial extension. PDF / docx need
+  *extraction* (not just text decode) and stay out until there's a clean extractor path.
+- **Managed library (per room).** A toggleable file set injected as a context **prefix** (a non-turn,
+  re-orderable, switch-on/off version) — keep files in a room and activate only the relevant ones. Also
+  the per-token cost lever (the current model re-sends every file-turn every round; a prefix you can
+  toggle off is the way to bound that).
+- **Projects (the bigger build).** A container above rooms — multiple rooms sharing a set of
+  **project-scoped common files**, à la claude.ai / Grok. Folds into rooms-as-folders (a project folder
+  holding room folders + a shared `files/` dir), with project files injected as the managed-prefix into
+  every room in the project. The new part is the project↔room hierarchy, not the file mechanism.
+- **Margin-intake bookmarklet** (drafted as phase 21) also remains deferred.
+
 ## Considered and rejected (recorded so it isn't re-litigated)
 
 - **Shared-retrieval / common-evidence pool for research rounds.** When web search landed
@@ -74,6 +93,25 @@ Phase 17's `openrouter:web_search` already covers it (paid, but the free proxy s
 No `search_dialect` / xAI search branch was built. Revisit only if xAI exposes the Agent Tools API on
 chat-completions, or Fusion gains a Responses-API adapter.
 
+## Deferred / dormant from Phase 20 (OpenRouter consolidation)
+
+- **`anthropic_style` + the anthropic/xAI search branches are dormant, not removed.** With every
+  active panelist on the `openai` backend (OR rows + proxy-Grok), the Anthropic adapter and the
+  Phase-17 anthropic-native search branch aren't exercised; the live search dispatch is effectively
+  `openrouter:web_search` (OR rows) or none (proxy-Grok). Kept for a future **direct** Anthropic/xAI
+  provider — delete only if that's firmly off the table.
+- **proxy-Grok search gap stands.** It's the one search-less seat (Phase 19.2 — xAI search doesn't
+  traverse the proxy). For Grok-with-search in research, add an OpenRouter-routed Grok seat.
+- **Reasoning effort is per-room by design** (travels with the room, set once, survives switches).
+  The only piece deferred: an optional **per-provider preferred default for *new* rooms** (seeding a
+  new room above the model's own default) — pending whether you find yourself bumping every new room
+  the same way. Until then, new rooms start at the model default.
+- **Effort options are metadata-driven** (closed in the 20.4 refinement): read per-model from
+  OpenRouter's `/models` `reasoning.supported_efforts` (cached by base_url, reversed to ascending),
+  with an optional per-row `supported_efforts` config override. Still deferred: honouring
+  `mandatory` (force-on, hide the off case) and `default_effort` per model when seeding a new room
+  — minor, pending real use. Today new rooms start at the model default via OR (no override sent).
+
 ## Cleanup carried into packaging
 
 - **Retire the seeded `/transcript` shim — DONE.** It existed only to keep the pre-rooms
@@ -83,12 +121,12 @@ chat-completions, or Fusion gains a Responses-API adapter.
 
 ## Deferred from Phase 14 (settings re-jig / preview / artifacts)
 
-- **Cost estimate** in the token chip. Deliberately omitted now to avoid a stale-pricing
-  maintenance tail across 5 models. Revisit with hand-maintained per-model rates,
-  subscription-aware (Grok = free at the margin), clearly labelled an estimate. (Model %
-  and token estimate shipped in 14C; cost is the piece left out.) Phase 17 added a second
-  billable axis — web search is billed per call, so a search-enabled round costs N× search on
-  top of tokens; fold that in when cost lands.
+- **Cost estimate — LARGELY SHIPPED (Phase 23).** Real per-request USD cost now comes from
+  OpenRouter's authoritative `usage.cost` (no price table, reflects the actual route), shown
+  per-model + as a session total; off-OR seats show *free*. What's still deferred: cost for
+  **non-OpenRouter API rows** (no `usage.cost`) would need hand-maintained per-model rates —
+  only worth it if a direct (non-OR) billable row comes back. Web search bills separately
+  (Phase 17, N× per round); OR folds that into `usage.cost` already, so it's covered for OR seats.
 - **Inferred room summary.** The hover preview ships the *cheap* version (14E: first line of
   the latest answer, no model call). The upgrade is a model-generated 1-line summary cached in
   `room.json`, regenerated every N new turns.
@@ -96,6 +134,18 @@ chat-completions, or Fusion gains a Responses-API adapter.
   (esp. how a research round renders: N speakers → judge) from real transcripts first.
 - **VS Code progress mirror.** Not an embedded IDE — a read-only tail of Claude Code's
   activity/log. Revisit after the week; "mirror CC's progress", not "embed VS Code".
+
+## Wave 5 — per-model compact-and-swap (the context rings are its trigger surface)
+
+Phase 23 shipped per-model context-fill rings (forward tokens ÷ each model's own window). They were
+built per-model on purpose: the end-state is to **compact-and-swap a single model when *its* window
+fills** while the others keep going. When that lands, the rings are its trigger and share the same
+window data — now the **effective routed window** (Phase 24: `top_provider.context_length` / endpoints-
+min, not just the headline) + configured windows for off-OR seats. The new work is the
+compaction itself: summarise/evict one seat's slice of forward context, swap in the digest, reset that
+ring — without disturbing the other seats' context. Until then the numerator is shared across rings
+(they differ only by window); post-compaction each ring reflects its own context. See
+[BUILD_amendment_phase23.md](BUILD_amendment_phase23.md).
 
 ## Next up (not deferred, just not started)
 

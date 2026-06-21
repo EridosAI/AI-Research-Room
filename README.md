@@ -56,9 +56,41 @@ Two layers, cleanly split:
   falls back to a panelist that answered, so a bad judge can't sink a good round.
 - **Visible reasoning (opt-in, best-effort).** Flip "show reasoning" on a provider and its
   answers carry the model's reasoning, shown as a collapsed "thinking" disclosure in the turn's
-  footer. It's stored on the turn's `meta`, which `build_context` never serializes — so
-  reasoning is visible only to you and **never re-sent to another model** (also required:
-  some APIs reject replayed reasoning). Providers that don't expose it simply contribute none.
+  footer. Captured from OpenRouter's `reasoning_details` (summary + text; encrypted entries
+  skipped) or `reasoning`, falling back to direct providers' `reasoning_content`. It's stored on
+  the turn's `meta`, which `build_context` never serializes — so reasoning is visible only to you
+  and **never re-sent to another model**. Providers that don't expose it simply contribute none.
+- **Per-model reasoning effort (per room).** Each OpenRouter panelist's square (see the model bar)
+  carries a `high / medium / low` effort selector; the choice is stored **per-room, per-panelist**
+  (it travels with the room) and sent as OR's `reasoning: {effort}` next turn. New rooms start at
+  the model's default (Opus 4.8 = high, so Claude thinks out of the box). Models with no effort
+  control (the proxy-Grok seat) omit the selector.
+- **Model-square bar.** Above the composer, one square per active panelist — a context-fill ring
+  around the speaker dot + that model's token spend. Hover (or tap) opens a popover with the effort
+  selector (present in both converse and research), full token count, share of the room's spend, **real
+  USD cost**, and **context used / window**; a session-total chip (tokens · cost) sits at the end. The
+  popover is built from a declarative cell list, so adding a field is a one-line append.
+- **Real cost surfacing.** OpenRouter returns the authoritative per-request USD cost (`usage.cost`),
+  captured to the turn's meta and shown as accumulated per-model cost in the popover plus a session
+  total. Off-OpenRouter seats (proxy-Grok, CLI subscriptions) show **free**. Like tokens, cost rides
+  `meta` and never re-enters forward context.
+- **Per-model context gauge.** Each tile's ring shows that model's forward-context fill against **its
+  own** window, ramping green → amber → red as it nears the limit — watched per model so a single seat
+  can be refreshed when *its* window fills (the trigger surface for per-model compaction). The ring
+  calibrates to the **effective routed window**, not just the headline: OpenRouter routes a model
+  across providers that may serve a smaller window (common for multi-provider open-weight seats), so
+  the gauge uses `top_provider.context_length` (or the per-endpoint floor) to warn before the *real*
+  limit. A small dot in the popover flags a window that's **reduced** from the headline or **changed**
+  since it was seeded, with both numbers in its tooltip.
+- **Copy button.** Every model answer's footer has a copy button (copies the turn's text), beside the
+  thinking / model / sources affordances.
+- **Add models from a dropdown.** Adding a provider offers a searchable list of OpenRouter's models
+  (live from `/models`); picking one seeds the row's context window and reasoning support. Any
+  OpenAI-compatible endpoint can still be added by hand (base_url + typed model id).
+- **No-search guard.** A seat with no active web search (proxy-Grok, or any search-off seat) is told so
+  in its system prompt — answer from training knowledge, but flag current/real-time facts it can't
+  verify instead of presenting them as freshly searched. Capability-driven (tied to the web-search
+  flag), so it auto-covers any search-less seat and never fires when search is on.
 - **Served-model provenance.** Beside "thinking" sits a non-interactive **model** pill carrying
   `meta.served_model` — what the API *reported* serving the turn (`response.model`), distinct from
   the *configured* model in the header. They're usually equal; when they differ the mismatch is
@@ -74,6 +106,16 @@ Two layers, cleanly split:
   scheme-allowlisted to http/https); like reasoning, the trace never re-enters forward context.
   Off by default — search bills per call, so an N-panelist round costs N× search. Converse stays
   no-search.
+- **Attached files (drag-drop or pick).** Drop a `.md` / `.txt` onto the composer (or use the 📎
+  button); it stages as a removable chip and, on send, becomes a **file-turn** the panel reads —
+  the way you load files at the start of a claude.ai / Grok chat. No new context plumbing: the
+  file's content *is* the turn's `text`, so it rides the ordinary forward-context path (converse
+  via `build_context`; research threads it into the blind panel payload). You can send files with an
+  empty message to just load them, then ask separately. It's a **snapshot** — editing the source
+  later doesn't update the turn; re-drop to refresh. A file-turn renders as a collapsed chip
+  (expand to view; `.md` rendered, anything else as plain text — never raw HTML). **Cost note:** a
+  loaded file is re-sent to every panelist every round, so keep attached files lean. Text only for
+  now (`.md` / `.txt`); richer formats need extraction (deferred).
 - **Obsidian export (opt-in).** Set an export folder and every room renders a read-only `.md`
   there after each turn — the filtered, foregrounded view (syntheses up top, raw panel
   answers in a collapsed callout, margin excluded) with YAML frontmatter (room, date,
@@ -142,6 +184,11 @@ secrets**. It's machine-managed by the web UI but human-readable. The built-in t
 | `grok` | cli | — (`run_grok*.sh`) | SuperGrok subscription | `grok-4` |
 | `kimi` | api | openai | `https://api.moonshot.ai/v1` | `kimi-k2.6` |
 | `deepseek` | api | openai | `https://api.deepseek.com` | `deepseek-v4-pro` |
+
+A simple setup routes **every reasoning panelist through OpenRouter** (`openai` backend,
+`openrouter.ai` base — one billing relationship, one uniform `reasoning: {effort}` shape, and
+OpenRouter handles Claude's adaptive-thinking mapping) and keeps **Grok on the Hermes proxy**. With
+all active rows on the `openai` backend, the `anthropic` adapter just isn't exercised.
 
 Add more in the UI (⚙ providers) — any OpenAI-compatible endpoint. `base_url` is stored
 verbatim; the adapter appends `/chat/completions` (openai) or `/v1/messages` (anthropic) —
@@ -297,6 +344,14 @@ RR_LIVE=1 python tests/live_phase17.py # OPT-IN, billed: confirm live Anthropic/
 python tests/engine_phase18.py         # research token ceiling + finish_reason capture/normalization
 python tests/browser_phase18.py        # ⚠ truncated/incomplete badge keyed off finish_reason
 python tests/engine_phase19.py         # Grok-via-proxy provider parses through the existing adapter
+python tests/engine_phase20.py         # OpenRouter reasoning request/capture + per-room effort threading
+python tests/browser_phase20.py        # model-square bar + reasoning selector + draggable composer split
+python tests/engine_phase22.py         # inline file drop: file-turn shape + forward-context + research threading
+python tests/browser_phase22.py        # composer file stage/remove/reject + file-turn chip + safe expand
+python tests/engine_phase23.py         # cost capture/isolation + no-search guard + OR catalog + config round-trip
+python tests/browser_phase23.py        # copy button + cost cell + converse effort + context rings + OR dropdown
+python tests/engine_phase24.py         # effective routed window (top_provider/endpoints-min) + reduced/changed flags
+python tests/browser_phase24.py        # ring calibrates to effective window + reduced/changed popover dot
 ```
 
 ## Environment

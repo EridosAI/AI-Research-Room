@@ -27,6 +27,7 @@
   </aside>
   <button id="sidebar-expand" class="sidebar-expand hidden" title="show rooms">☰</button>
   <div id="room-preview" class="room-preview hidden"></div>
+  <div id="model-popover" class="model-popover hidden"></div>
 
   <div id="app" class="app">
     <header>
@@ -85,7 +86,8 @@
             <div class="add-grid">
               <input id="add-name" placeholder="name (e.g. openrouter)" />
               <input id="add-base" placeholder="base_url" />
-              <input id="add-model" placeholder="model (optional)" />
+              <input id="add-model" list="add-model-list" placeholder="model (search OpenRouter, or type an id)" />
+              <datalist id="add-model-list"></datalist>
               <input id="add-key" type="password" placeholder="api key (optional)" />
               <button id="add-btn">add</button>
             </div>
@@ -122,11 +124,6 @@
             <input id="display-name" type="text" placeholder="how the app addresses you (default: human)" />
             <button id="display-name-save">save</button>
           </div>
-          <div class="judge-row">
-            <label>token chip</label>
-            <label class="authtoggle"><input type="checkbox" id="chip-tokens" /> token estimate</label>
-            <label class="authtoggle"><input type="checkbox" id="chip-pct" /> model %</label>
-          </div>
         </div>
 
         <div class="tab-pane hidden" data-pane="data">
@@ -154,8 +151,9 @@
           <div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>
         </main>
 
+        <div id="composer-resizer" class="composer-resizer" title="drag to resize the composer"></div>
         <footer class="composer">
-          <div id="token-bar" class="token-bar"></div>
+          <div id="token-bar" class="model-bar"></div>
           <div class="composer-row">
             <label class="mode"><input type="radio" name="mode" value="converse" checked /> converse</label>
             <label class="mode"><input type="radio" name="mode" value="research" /> research</label>
@@ -166,9 +164,14 @@
               <span id="panel-pick" class="panel-pick"></span>
             </span>
           </div>
-          <div class="composer-row">
-            <textarea id="input" rows="3" placeholder="Message the room…  (Enter to send · Shift+Enter for newline)"></textarea>
-            <button id="send-btn">send</button>
+          <div id="staged-files" class="staged-files hidden"></div>
+          <div class="composer-row input-row">
+            <textarea id="input" rows="3" placeholder="Message the room…  (Enter to send · Shift+Enter for newline · drop .md/.txt to attach)"></textarea>
+            <div class="input-actions">
+              <button id="attach-btn" title="attach a .md or .txt file">📎</button>
+              <button id="send-btn">send</button>
+            </div>
+            <input type="file" id="file-input" accept=".md,.txt,text/markdown,text/plain" multiple hidden />
           </div>
           <div id="status" class="status"></div>
         </footer>

@@ -104,9 +104,9 @@ def main() -> int:
     seen = []
     real_call = providers.call_model
 
-    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None):
+    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, **kw):
         seen.append((provider_key, tools, max_tokens))
-        return real_call(provider_key, payload, tools=tools, effort=effort, max_tokens=max_tokens)
+        return real_call(provider_key, payload, tools=tools, effort=effort, max_tokens=max_tokens, **kw)
 
     providers.call_model = _spy   # modes calls providers.call_model by attribute → this patch is seen
     try:

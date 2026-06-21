@@ -35,13 +35,52 @@ JUDGE_SYSTEM = (
 )
 
 
+# ---- attached files (Phase 22) ----------------------------------------------
+# A dropped .md/.txt becomes a file-turn whose `text` IS the content, so it rides
+# the ordinary turn.text forward-context path (no new injection plumbing). Text
+# only: .md/.txt read as text trivially; richer formats (pdf/docx) need extraction
+# and stay out (DEFERRED).
+TEXT_EXTS = {".md", ".txt"}
+MAX_FILE_BYTES = 1_000_000   # 1 MB per file — a guard, not a product limit
+
+
+def _file_ext(filename: str) -> str:
+    name = (filename or "").strip().lower()
+    return name[name.rfind("."):] if "." in name else ""
+
+
+def attach_file(room_id: str, filename: str, content: str) -> dict:
+    """Append a file-turn to a room (no model call). The turn's text is
+    `[file: {filename}]\\n\\n{content}` — the lightweight header tells the panel
+    it's an attached document; the content then flows forward exactly like a typed
+    message (build_context serializes turn.text; research threads it into the blind
+    payload). Raises ValueError on a non-text extension or oversize file."""
+    ext = _file_ext(filename)
+    if ext not in TEXT_EXTS:
+        raise ValueError(f"text files only (.md/.txt) — got {filename!r}")
+    if len((content or "").encode("utf-8")) > MAX_FILE_BYTES:
+        raise ValueError(f"file too large: {filename!r} (> {MAX_FILE_BYTES} bytes)")
+    path = rooms.main_path(room_id)
+    meta = {"kind": "file", "filename": filename,
+            "size": len((content or "").encode("utf-8"))}
+    text = f"[file: {filename}]\n\n{content or ''}"
+    return transcript.append(transcript.make_turn("converse", "human", "human", text, meta), path)
+
+
+def _attached_docs(turns: list[dict]) -> list[str]:
+    """The text of every file-turn in a transcript, in order — the documents loaded
+    into the room. Re-sent to the panel every research round (see the cost note)."""
+    return [t["text"] for t in turns if (t.get("meta") or {}).get("kind") == "file"]
+
+
 # ---- research ---------------------------------------------------------------
-def _panelist(speaker: str, blind_payload: dict, effort: str):
+def _panelist(speaker: str, blind_payload: dict, effort: str, reasoning_effort: str | None = None):
     """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
     a failure becomes an absence, captured for the judge prompt."""
     try:
         reply = providers.call_model(speaker, blind_payload, tools=True, effort=effort,
-                                     max_tokens=settings.RESEARCH_MAX_TOKENS)
+                                     max_tokens=settings.RESEARCH_MAX_TOKENS,
+                                     reasoning_effort=reasoning_effort)
         if not reply.text.strip():
             return speaker, None, "empty answer"
         return speaker, reply, None
@@ -109,16 +148,24 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
     if not judge:
         raise ValueError("no judge selected for this room")
     round_id = str(uuid.uuid4())
+    efforts = room.get("reasoning_effort") or {}   # per-panelist override; absent → model default
+
+    # Attached documents (Phase 22): research builds a blind, STATELESS payload (no
+    # build_context), so loaded files must be threaded in explicitly or they'd reach
+    # converse but never the panel. Prepend every file-turn so each panelist works
+    # over the same documents (re-sent every round — keep loaded files lean).
+    docs = _attached_docs(transcript.load(path))
+    doc_block = ("\n\n".join(docs) + "\n\n===== END ATTACHED FILES =====\n\n") if docs else ""
 
     # 1. append human turn
     transcript.append(transcript.make_turn(
         "research", "human", "human", prompt, {"round_id": round_id}), path)
 
-    # 2. fan out — parallel, blind (only the prompt + panel instruction)
+    # 2. fan out — parallel, blind (only the documents + prompt + panel instruction)
     blind = {"system": "", "messages": [
-        {"role": "user", "content": f"{prompt}\n\n---\n{PANEL_INSTRUCTION}"}]}
+        {"role": "user", "content": f"{doc_block}{prompt}\n\n---\n{PANEL_INSTRUCTION}"}]}
     with ThreadPoolExecutor(max_workers=max(1, len(panel))) as ex:
-        results = list(ex.map(lambda s: _panelist(s, blind, effort), panel))
+        results = list(ex.map(lambda s: _panelist(s, blind, effort, efforts.get(s)), panel))
 
     # 3. append each raw answer; collect absences
     answers: list[tuple[str, str]] = []
@@ -147,13 +194,13 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
     judge_used = judge
     meta = {"round_id": round_id}
     try:
-        reply = _call_judge(judge, judge_payload, effort)
+        reply = _call_judge(judge, judge_payload, effort, efforts.get(judge))
     except Exception:  # noqa: BLE001
         fallbacks = [s for s, _ in answers if s != judge]
         if not fallbacks:
             raise
         judge_used = fallbacks[0]
-        reply = _call_judge(judge_used, judge_payload, effort)
+        reply = _call_judge(judge_used, judge_payload, effort, efforts.get(judge_used))
         meta["judge_fallback_from"] = judge
 
     # 5. append synthesis (role=judge, same round_id) and return
@@ -164,13 +211,15 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
     return reply.text
 
 
-def _call_judge(judge: str, payload: dict, effort: str):
+def _call_judge(judge: str, payload: dict, effort: str, reasoning_effort: str | None = None):
     try:
         return providers.call_model(judge, payload, tools=True, effort=effort,
-                                    max_tokens=settings.RESEARCH_MAX_TOKENS)
+                                    max_tokens=settings.RESEARCH_MAX_TOKENS,
+                                    reasoning_effort=reasoning_effort)
     except providers.RunnerUnavailable:
         return providers.call_model(judge, payload, tools=False,
-                                    max_tokens=settings.RESEARCH_MAX_TOKENS)
+                                    max_tokens=settings.RESEARCH_MAX_TOKENS,
+                                    reasoning_effort=reasoning_effort)
 
 
 # ---- converse ---------------------------------------------------------------
@@ -189,7 +238,8 @@ def converse(room_id: str, prompt: str, addressed_to: str | None = None,
 
     ctx = build_context(transcript.load(path), addressed_to, "converse",
                         participants=room["participants"], human_label=human_label)
-    reply = providers.call_model(addressed_to, ctx, tools=False)
+    eff = (room.get("reasoning_effort") or {}).get(addressed_to)
+    reply = providers.call_model(addressed_to, ctx, tools=False, reasoning_effort=eff)
 
     meta = {"model": providers.provider(addressed_to).model, **_reply_meta(reply)}
     transcript.append(transcript.make_turn(

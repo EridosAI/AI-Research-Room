@@ -362,17 +362,78 @@ input, textarea { color: var(--text-primary); }
   border: 1px solid var(--border-default); border-radius: var(--radius-lg); padding: 7px 9px; }
 #margin-status { padding: 0 12px 8px; }
 
-/* token / context indicator */
-.token-bar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;
+/* model-square bar — one tile per active panelist (dot + spend), + a session total */
+.model-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px;
   font-size: 11.5px; color: var(--text-tertiary); font-family: var(--font-mono); }
-.token-bar:empty { display: none; }
-.tchip { display: inline-flex; align-items: center; gap: 4px; }
-.tchip.total { color: var(--text-secondary); border-left: 1px solid var(--border-default); padding-left: 10px; }
+.model-bar:empty { display: none; }
+/* fixed-width tiles — identical regardless of value (sized to fit ~1.2M), centred */
+.model-square { display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  width: 74px; cursor: pointer; padding: 3px 6px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-tertiary); }
+.model-square:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.model-square .dot { margin-right: 0; }
+.model-square span { font-variant-numeric: tabular-nums; }
+.session-total { color: var(--text-secondary); margin-left: auto; padding-left: 10px; font-variant-numeric: tabular-nums; }
 
-/* composer */
-.composer { border-top: 1px solid var(--border-subtle); padding: 10px 16px; }
+/* per-model context-fill ring — speaker dot centred in a coloured ring (arc =
+   forward-context tokens ÷ that model's window). Ramps green→amber→red as it fills. */
+.tile-glyph { position: relative; width: 18px; height: 18px; display: inline-flex;
+  align-items: center; justify-content: center; flex: 0 0 auto; }
+.tile-glyph .dot { margin: 0; position: absolute; }
+.ctx-ring { position: absolute; inset: 0; }
+.ctx-ring-bg { stroke: var(--border-strong); stroke-width: 2.5; }
+.ctx-ring-fg { stroke-width: 2.5; stroke-linecap: round; transition: stroke-dashoffset .3s ease; }
+.ctx-ring-fg.ok   { stroke: var(--success); }
+.ctx-ring-fg.warn { stroke: var(--warning); }
+.ctx-ring-fg.crit { stroke: var(--error); }
+
+/* Phase-24 window dot — reduced-from-headline / changed-since-seeded (tooltip carries
+   the numbers). Small + unobtrusive, beside the popover's Context value. */
+.win-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--error); margin-left: 6px; vertical-align: middle; cursor: help; }
+
+/* copy button on output turns — quiet, like the other footer affordances */
+.copy-btn { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary);
+  background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-md); }
+.copy-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
+/* model popover — anchored ABOVE its square (bar sits at the bottom) */
+.model-popover { position: fixed; z-index: 60; width: 230px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal); padding: 10px 12px; font-size: var(--text-xs); }
+.model-popover.hidden { display: none; }
+
+/* header: colour dot + stripped model name + via-subtitle */
+.mp-headrow { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 10px; }
+.mp-headbox { min-width: 0; }
+.mp-head { font-weight: var(--weight-semibold); font-size: var(--text-sm); color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-sub { color: var(--text-tertiary); font-size: 11px; }
+
+/* effort: bolt label + full-width segmented control */
+.mp-effort { margin-bottom: 10px; }
+.mp-label { display: flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: 11px; margin-bottom: 5px; }
+.mp-bolt { flex: 0 0 auto; }
+.mp-seg { display: flex; gap: 4px; }
+.mp-seg button { flex: 1; padding: 3px 0; font-size: 11px; }
+.mp-seg button.sel { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--text-primary); }
+
+/* stat block: thin divider, then one-line label↔value rows */
+.mp-stats { border-top: 1px solid var(--border-subtle); padding-top: 8px; }
+.mp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.mp-row:last-child { margin-bottom: 0; }
+.mp-rlabel { color: var(--text-tertiary); }
+.mp-rval { color: var(--text-secondary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* composer — flex column so the input flexes to fill a dragged height */
+.composer-resizer { flex: 0 0 6px; cursor: row-resize; }
+.composer-resizer:hover { background: var(--accent); opacity: .5; }
+.composer { border-top: 1px solid var(--border-subtle); padding: 10px 16px;
+  display: flex; flex-direction: column; min-height: 0; }
 .composer-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
 .composer-row:last-child { margin-bottom: 0; }
+.composer-row.input-row { flex: 1 1 auto; align-items: stretch; min-height: 0; }
+.composer-row.input-row #input { resize: none; height: 100%; }
 .mode { font-size: var(--text-sm); color: var(--text-tertiary); cursor: pointer; }
 .hint { font-size: var(--text-xs); color: var(--text-tertiary); }
 .panel-pick { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--text-xs); color: var(--text-tertiary); }
@@ -391,6 +452,33 @@ input, textarea { color: var(--text-primary); }
 .spinner { display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px;
   border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* attached files (Phase 22) — drop affordance, staged chips, send/attach stack */
+.composer.dropping { outline: 2px dashed var(--accent); outline-offset: -4px; border-radius: var(--radius-md); }
+.input-actions { display: flex; flex-direction: column; gap: 6px; align-self: stretch; }
+.input-actions #send-btn { flex: 1 1 auto; align-self: auto; }
+#attach-btn { flex: 0 0 auto; padding: 0 14px; font-size: 15px; line-height: 1; }
+.staged-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs);
+  background: var(--bg-tertiary); border: 1px solid var(--border-default); border-radius: var(--radius-full);
+  padding: 3px 6px 3px 10px; color: var(--text-secondary); }
+.file-chip-size { color: var(--text-tertiary); }
+.file-chip-x { padding: 0 5px; font-size: 11px; line-height: 1; border-radius: var(--radius-full);
+  background: transparent; border: none; color: var(--text-tertiary); }
+.file-chip-x:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+/* a file-turn in the transcript: a collapsed chip that expands to the content */
+.file-turn { margin: 8px 0; }
+.file-turn-head { display: inline-flex; align-items: center; gap: 8px; width: 100%;
+  text-align: left; font-size: var(--text-sm); color: var(--text-secondary);
+  background: var(--accent-subtle); border: 1px solid var(--accent-border); border-radius: var(--radius-lg); padding: 8px 12px; }
+.file-turn-head:hover { background: var(--accent-subtle); border-color: var(--accent); color: var(--text-primary); }
+.file-turn-caret { flex: 0 0 auto; color: var(--text-tertiary); font-size: 11px; }
+.file-turn-name { flex: 1 1 auto; }
+.file-turn-size { flex: 0 0 auto; color: var(--text-tertiary); font-size: var(--text-xs); }
+.file-turn-body { margin-top: 6px; background: var(--bg-tertiary); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg); padding: 10px 14px; max-height: 360px; overflow: auto; }
+.file-turn-pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: var(--text-sm); color: var(--text-secondary); }
 
 /* scrollbar — transcript + margin panes only (not global): track invisible against
    the surface, thumb a lighter handle that themes with the tokens */

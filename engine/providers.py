@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,7 @@ class Provider:
     converse_runner: str | None = None  # cli providers: converse-turn runner
     reasoning: bool = False  # opt-in: capture this provider's reasoning (cost/latency)
     web_search: bool = False  # opt-in: attach server-side web search on tools=True calls (bills per search)
+    supported_efforts: list | None = None  # optional config override (ascending); else read from OR /models
     context_window: int = 0  # token window for the fill gauge; 0 = unknown (you set it)
 
 
@@ -94,6 +96,8 @@ def _load() -> None:
             converse_runner=d.get("converse_runner"),
             reasoning=bool(d.get("reasoning", False)),
             web_search=bool(d.get("web_search", False)),
+            supported_efforts=(list(d["supported_efforts"])
+                               if isinstance(d.get("supported_efforts"), list) else None),
             context_window=int(d.get("context_window", 0) or 0),
         )
     _registry = reg
@@ -106,6 +110,14 @@ def _toml_scalar(v) -> str:
     if isinstance(v, int):           # emit ints unquoted (e.g. context_window)
         return str(v)
     return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _toml_value(v) -> str:
+    """Scalar or a TOML array — lists (e.g. supported_efforts) must round-trip as
+    arrays, not be stringified (which would reload as None and drop the override)."""
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_scalar(x) for x in v) + "]"
+    return _toml_scalar(v)
 
 
 _TOML_BANNER = (
@@ -124,7 +136,7 @@ def _dump_toml() -> str:
         for k, v in d.items():
             if v is None:
                 continue
-            lines.append(f"{k} = {_toml_scalar(v)}")
+            lines.append(f"{k} = {_toml_value(v)}")
         lines.append("")
     return "\n".join(lines)
 
@@ -163,6 +175,129 @@ def enabled() -> list[str]:
 
 def research_judge() -> str:
     return _research_judge
+
+
+# ---- reasoning-effort metadata (per-model, from OpenRouter's /models) --------
+_effort_cat_lock = threading.Lock()
+_effort_cat: dict[str, dict] = {}   # base_url -> {model_id: efforts ascending}
+
+
+def effort_catalog(p: Provider) -> dict:
+    """Cached OR /models effort metadata, keyed by base_url. Non-OR → {}. Best-effort:
+    an empty/failed fetch isn't cached, so it retries once a key/connection appears."""
+    base = p.base_url or ""
+    if "openrouter.ai" not in base:
+        return {}
+    with _effort_cat_lock:
+        if base in _effort_cat:
+            return _effort_cat[base]
+    cat: dict = {}
+    try:
+        cat = openai_style.reasoning_catalog(p, secrets.get(p.key))
+    except Exception:  # noqa: BLE001 — offline / no key → no selector, never a crash
+        cat = {}
+    if cat:
+        with _effort_cat_lock:
+            _effort_cat[base] = cat
+    return cat
+
+
+def effort_options(p: Provider) -> list | None:
+    """Effort choices for a provider's selector (ASCENDING), or None (no control):
+    config `supported_efforts` override → OR /models metadata → None."""
+    if p.supported_efforts:
+        return list(p.supported_efforts)
+    return effort_catalog(p).get(p.model)
+
+
+# ---- OR model catalog (for the add-a-model dropdown) ------------------------
+_model_cat_lock = threading.Lock()
+_model_cat: dict[str, list] = {}   # base_url -> [{id, context_length, reasoning, supported_efforts}]
+
+
+def or_model_catalog() -> list[dict]:
+    """The full OpenRouter model list (id + metadata) for the add-a-model dropdown,
+    fetched via the first enabled-or-not OR provider that has a key. Cached by
+    base_url (best-effort; an empty/failed fetch isn't cached). [] when there's no
+    OR row with a key (the UI falls back to a typed model id)."""
+    for k, p in _registry.items():
+        if "openrouter.ai" not in (p.base_url or ""):
+            continue
+        key = secrets.get(k)
+        if not key:
+            continue
+        base = p.base_url or ""
+        with _model_cat_lock:
+            if base in _model_cat:
+                return _model_cat[base]
+        try:
+            cat = openai_style.model_catalog(p, key)
+        except Exception:  # noqa: BLE001 — offline / bad key → no dropdown, never a crash
+            cat = []
+        if cat:
+            with _model_cat_lock:
+                _model_cat[base] = cat
+        return cat
+    return []
+
+
+# ---- effective context window (Phase 24) ------------------------------------
+_win_lock = threading.Lock()
+_win_cache: dict[tuple, dict] = {}   # (base_url, model) -> {effective, headline}
+
+
+def _off_or_window(p: Provider) -> dict:
+    """Off-OR / no-data fallback: the configured window, nothing to compare against."""
+    return {"effective": p.context_window or 0, "headline": None,
+            "reduced": False, "changed": False}
+
+
+def _resolve_or_window(p: Provider, key: str) -> dict | None:
+    """{effective, headline} for an OR seat: headline = /models context_length;
+    effective = top_provider.context_length, falling back to the endpoints MIN when the
+    inline value is absent. None when the model isn't in the catalog."""
+    entry = next((m for m in or_model_catalog() if m["id"] == p.model), None)
+    if not entry:
+        return None
+    headline = entry.get("context_length") or 0
+    eff = entry.get("effective_window") or 0
+    if not eff:
+        try:
+            eff = openai_style.endpoints_min_window(p, p.model, key)
+        except Exception:  # noqa: BLE001 — endpoints unavailable → fall back to headline
+            eff = 0
+    return {"effective": eff or headline, "headline": headline}
+
+
+def window_info(p: Provider) -> dict:
+    """The context gauge's window facts: {effective, headline, reduced, changed}.
+    OR seats resolve the effective routed window (cached) and compare to the headline +
+    the seeded config window; off-OR seats use the configured window with no comparison.
+      - reduced: effective < headline (the route serves a smaller window than advertised)
+      - changed: a fresh headline differs from the seeded config window (re-seed cue)."""
+    base = p.base_url or ""
+    if "openrouter.ai" not in base:
+        return _off_or_window(p)
+    key = secrets.get(p.key)
+    if not key:
+        return _off_or_window(p)
+    ck = (base, p.model)
+    with _win_lock:
+        cached = _win_cache.get(ck)
+    if cached is None:
+        cached = _resolve_or_window(p, key)
+        if cached:
+            with _win_lock:
+                _win_cache[ck] = cached
+    if not cached:
+        return _off_or_window(p)
+    eff, headline = cached["effective"], cached["headline"]
+    return {
+        "effective": eff or headline or (p.context_window or 0),
+        "headline": headline,
+        "reduced": bool(headline and eff and eff < headline),
+        "changed": bool(headline and p.context_window and headline != p.context_window),
+    }
 
 
 # ---- mutation (write-back to config.toml) -----------------------------------
@@ -218,19 +353,27 @@ def _slug(s: str) -> str:
 
 
 def create_provider(name: str, base_url: str, model: str = "",
-                    auth_mode: str = "api", backend: str = "openai") -> str:
-    """Add an OpenAI-compatible (or other) provider via the UI. Returns its key."""
+                    auth_mode: str = "api", backend: str = "openai",
+                    context_window: int | None = None, reasoning: bool | None = None) -> str:
+    """Add an OpenAI-compatible (or other) provider via the UI. Returns its key.
+    `context_window`/`reasoning` seed metadata-driven defaults when adding from the OR
+    model dropdown (the fill gauge's window + the reasoning toggle)."""
     base = _slug(name)
     key = base
     i = 2
     while key in _raw.get("providers", {}):
         key = f"{base}-{i}"
         i += 1
-    _raw.setdefault("providers", {})[key] = {
+    row = {
         "display_name": name, "auth_mode": auth_mode, "backend": backend,
         "base_url": (base_url or "").rstrip("/"), "model": model,
         "enabled": True, "color": _auto_color(key),
     }
+    if context_window:
+        row["context_window"] = int(context_window)
+    if reasoning is not None:
+        row["reasoning"] = bool(reasoning)
+    _raw.setdefault("providers", {})[key] = row
     _save()
     return key
 
@@ -308,8 +451,31 @@ def _cli_call(p: Provider, payload: dict, tools: bool, effort: str) -> str:
         return of.read_text(encoding="utf-8").strip()
 
 
+# Appended to a seat's system prompt when it has NO active web search this response
+# (capability-driven — fires for proxy-Grok and any search-off seat, never when search
+# is on). Stops a search-less model dressing stale answers as freshly searched, without
+# making it refuse to use its training knowledge.
+NO_SEARCH_GUARD = (
+    "You have no web search for this response. Answer from your own knowledge. When a "
+    "question needs current or real-time information you cannot verify, say so plainly "
+    "rather than presenting unverified specifics as if you had searched."
+)
+
+
+def _guard_no_search(payload: dict, searches: bool) -> dict:
+    """Return payload with the no-search guard folded into its system prompt when the
+    seat won't search this response; unchanged when it will. Returns a COPY (never
+    mutates a caller's shared payload — research fans one blind payload to N seats)."""
+    if searches:
+        return payload
+    sys = (payload.get("system") or "").strip()
+    sys = f"{sys}\n\n{NO_SEARCH_GUARD}".strip() if sys else NO_SEARCH_GUARD
+    return {**payload, "system": sys}
+
+
 def call_model(provider_key: str, payload: dict, tools: bool = False,
-               effort: str = "medium", max_tokens: int | None = None) -> ModelReply:
+               effort: str = "medium", max_tokens: int | None = None,
+               reasoning_effort: str | None = None) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -325,6 +491,10 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     """
     p = provider(provider_key)
     do_search = bool(tools and p.web_search)
+    # a seat "searches" this response via the api web-search tool OR (cli) its agentic
+    # runner on a tools=True call; otherwise it gets the no-search guard.
+    searches = do_search or (p.auth_mode == "cli" and tools)
+    payload = _guard_no_search(payload, searches)
     if p.backend == "mock":
         text = _mock_text(p, payload)
         rsn = (f"[mock reasoning · {p.key}] step 1 … step 2 … therefore." if p.reasoning else None)
@@ -345,7 +515,8 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
         kind = "summarized" if reasoning else None
     else:
         text, reasoning, raw, served, search, finish = openai_style.chat(
-            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens)
+            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort)
         kind = "full" if reasoning else None
     usage = ({**raw, "exact": True} if raw else _estimate_usage(payload, text))
     return ModelReply(text, reasoning, kind, usage, served_model=served,

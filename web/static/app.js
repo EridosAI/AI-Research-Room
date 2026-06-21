@@ -31,6 +31,7 @@ let STATE = {
   ui: { sidebar_collapsed: false, sidebar_width: 260 },
   marginTurns: [],           // active room's margin.jsonl
   marginOpen: false,
+  staged: [],                // composer-staged files [{filename, content}] (Phase 22)
 };
 
 // ===== theme mode (dark / light / system) ===================================
@@ -194,6 +195,7 @@ function groupTurns(turns) {
 }
 
 function renderConverse(t) {
+  if (t.meta && t.meta.kind === "file") return renderFileTurn(t);   // attached document (Phase 22)
   const div = document.createElement("div");
   div.className = "turn" + (t.role === "human" ? " human" : "");
   const isHuman = t.role === "human";
@@ -210,18 +212,21 @@ function renderConverse(t) {
 
 function plainPreview(text, n = 160) { return (text || "").replace(/\s+/g, " ").trim().slice(0, n); }
 
-// A non-interactive "model" pill: the API-reported served_model, revealed on hover
-// via the native title attribute (attribute/textContent only — never innerHTML, so
-// no parse of an untrusted string). Absent when served_model is. If it disagrees with
-// the header's configured meta.model, a subtle warning tint flags the mismatch.
+// A non-interactive provenance pill showing the API-reported served_model — glanceable
+// (the served id as text, provider/ prefix stripped), not hidden behind a hover. The
+// served string is the TRUTH vs the configured header label, so when they disagree the
+// pill tints (warning) and spells out both. textContent only — never innerHTML.
 function modelPill(t) {
   const served = t.meta && t.meta.served_model;
   if (!served) return null;
   const pill = el("span", "model-pill");
-  pill.textContent = "model";
-  pill.title = served;                                   // hover reveals; safe (attribute)
+  pill.textContent = served.includes("/") ? served.split("/").pop() : served;   // e.g. grok-4.3
+  pill.title = "served model: " + served;
   const configured = t.meta && t.meta.model;
-  if (configured && configured !== served) pill.classList.add("mismatch");
+  if (configured && configured !== served) {            // header label ≠ what the API served
+    pill.classList.add("mismatch");
+    pill.title += "  (configured: " + configured + ")";
+  }
   return pill;
 }
 
@@ -269,13 +274,27 @@ function truncBadge(meta) {
   return b;
 }
 
+// a copy button for an output turn: copies the turn's text with a brief "copied" state.
+function copyButton(t) {
+  const btn = el("button", "copy-btn");
+  btn.textContent = "copy"; btn.title = "copy this answer";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(t.text || "");
+      btn.textContent = "copied ✓"; setTimeout(() => (btn.textContent = "copy"), 1200);
+    } catch (e) { banner("copy failed: " + e.message); }
+  });
+  return btn;
+}
+
 function turnFooterParts(t) {
   const meta = t.meta || {};
   const hasReasoning = !!meta.reasoning;
   const served = meta.served_model;
   const sources = sourcesOf(meta);
   const trunc = truncBadge(meta);
-  if (!hasReasoning && !served && !sources.length && !trunc) return null;
+  const isOutput = t.role === "ai" || t.role === "judge";   // copy button on every output turn
+  if (!hasReasoning && !served && !sources.length && !trunc && !isOutput) return null;
   const footer = el("div", "turn-footer");
   const bodies = [];
   if (trunc) footer.append(trunc);                       // truncation flag leads (most important)
@@ -310,6 +329,7 @@ function turnFooterParts(t) {
     });
     footer.append(btn); bodies.push(body);
   }
+  if (isOutput) footer.append(copyButton(t));            // …copy last (rightmost)
   return { footer, bodies };
 }
 
@@ -406,7 +426,7 @@ function render() {
   $("#title").textContent = STATE.room ? STATE.room.title : "";
   $("#room-settings-btn").disabled = !STATE.room;
   $("#margin-toggle").disabled = !STATE.room;
-  renderTokenBar();
+  renderModelBar();
   const main = $("#stream"); main.innerHTML = "";
   if (!STATE.room) {
     main.innerHTML = '<div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>';
@@ -470,56 +490,226 @@ function fmtTokens(n) {
   if (n >= 1000) return Math.round(n / 1000) + "k";
   return "" + n;
 }
-// pre-send fill estimate: the synthesis-only forward view, ~chars/4 — same method
-// for every provider, so it's a fill gauge, not a billing figure (hence the ~).
-function estimateContextTokens() {
-  let chars = 0;
-  for (const t of STATE.turns) if (!(t.meta && t.meta.is_panelist_raw)) chars += (t.text || "").length;
-  return Math.round(chars / 4);
+function fmtCost(n) {
+  if (!n) return "$0.00";
+  return "$" + (n < 0.01 ? n.toFixed(4) : n.toFixed(2));
 }
-// per-model spend share over the room's stored usage (Grok estimate-only → ~).
+// is this seat billed via OpenRouter (has a real usage.cost) vs free/subscription
+// (proxy-Grok, cli — off-OR, no cost field)?
+function isORSeat(k) { return (((providerOf(k) || {}).base_url) || "").includes("openrouter.ai"); }
+
+// per-model spend share over the room's stored usage (Grok estimate-only → ~). Cost
+// (OpenRouter's authoritative usage.cost) is summed alongside tokens; off-OR seats
+// carry no cost field (free / subscription).
 function modelPercents() {
-  const per = {}; let total = 0, approx = false;
+  const per = {}, cost = {}; let total = 0, totalCost = 0, approx = false, anyCost = false;
   for (const t of STATE.turns) {
     const u = t.meta && t.meta.usage;
     if (!u || t.role === "human") continue;        // model turns only carry usage
     const tok = (u.input || 0) + (u.output || 0);
     per[t.speaker] = (per[t.speaker] || 0) + tok; total += tok;
+    if (typeof u.cost === "number") { cost[t.speaker] = (cost[t.speaker] || 0) + u.cost; totalCost += u.cost; anyCost = true; }
     if (!u.exact) approx = true;
   }
-  return { per, total, approx };
+  return { per, cost, total, totalCost, approx, anyCost };
 }
-function renderTokenBar() {
+
+// forward-context token estimate (~chars/4) — the turn.text that WOULD be sent next:
+// the synthesis-only forward view (raw panel answers excluded, like build_context).
+// Shared across models pre-compaction; each ring divides it by that model's own window.
+function forwardTokenEstimate() {
+  let chars = 0;
+  for (const t of STATE.turns) {
+    if (t.meta && t.meta.is_panelist_raw) continue;
+    chars += (t.text || "").length;
+  }
+  return Math.ceil(chars / 4);
+}
+
+// ===== model-square bar (per-panelist tiles + an extensible hover popover) ====
+// Each active panelist gets a square (dot + abbreviated spend). Hover/click opens a
+// popover whose CONTENTS come from a declarative cell list (MODEL_CELLS) — a new
+// field is a one-line append, not a re-layout. Session total sits at the bar's end.
+
+// Declarative popover cells. Each: build(key, info) → element | null (null skips it).
+// Declarative STAT rows (one line each: label left, value right). Append one entry
+// to add a field (e.g. cost, latency) — the extensibility lives here, not a placeholder.
+const STAT_CELLS = [
+  { label: "Tokens",        val: (k, i) => `${i.approx ? "~" : ""}${fmtTokens(i.raw)}` },
+  { label: "Share of room", val: (k, i) => `${i.approx ? "~" : ""}${i.pct}%` },
+  { label: "Cost",          val: (k, i) => isORSeat(k) ? fmtCost(i.cost) : "free" },
+  { label: "Context",       val: (k, i) => { const w = effectiveWindow(k); return w ? `${fmtTokens(i.ctxUsed)} / ${fmtTokens(w)}` : "—"; },
+                            note: (k) => windowDot(k) },
+];
+
+function mpRow(label, value, extra) {
+  const c = el("div", "mp-row");
+  const l = el("span", "mp-rlabel"); l.textContent = label;
+  const v = el("span", "mp-rval"); v.textContent = value;
+  if (extra) v.append(extra);                          // e.g. the Phase-24 window dot
+  c.append(l, v); return c;
+}
+
+// a small inline bolt (no icon-font dependency; themes via currentColor)
+function boltIcon() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", "mp-bolt");
+  svg.setAttribute("width", "12"); svg.setAttribute("height", "12");
+  svg.setAttribute("fill", "currentColor");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", "M13 2 4 14h6l-1 8 9-12h-6l1-8z");
+  svg.append(path); return svg;
+}
+
+// served/configured model name with the provider/ prefix stripped (claude-opus-4.8).
+function modelLabel(k) {
+  const m = (providerOf(k) || {}).model || k;
+  return m.includes("/") ? m.split("/").pop() : m;
+}
+// subtitle derived from the row's base_url.
+function modelVia(k) {
+  const b = (providerOf(k) || {}).base_url || "";
+  if (b.includes("openrouter.ai")) return "via OpenRouter";
+  if (/127\.0\.0\.1|localhost/.test(b)) return "via Hermes proxy";
+  return b ? "direct" : "";
+}
+
+function popoverHeader(k) {
+  const p = providerOf(k);
+  const head = el("div", "mp-headrow");
+  head.append(dot(p ? p.color : DOT_DEFAULT));
+  const box = el("div", "mp-headbox");
+  const name = el("div", "mp-head"); name.textContent = modelLabel(k); box.append(name);
+  const via = modelVia(k);
+  if (via) { const s = el("div", "mp-sub"); s.textContent = via; box.append(s); }
+  head.append(box); return head;
+}
+
+// effort selector — data-driven from the provider's effort_options (ASCENDING);
+// returns null (omitted) when the model exposes none (proxy-Grok / direct rows).
+function effortSection(k) {
+  const opts = (providerOf(k) || {}).effort_options;
+  if (!opts || !opts.length) return null;
+  const cur = (STATE.room && STATE.room.reasoning_effort && STATE.room.reasoning_effort[k]) || opts[opts.length - 1];
+  const c = el("div", "mp-effort");
+  const l = el("div", "mp-label"); l.append(boltIcon(), document.createTextNode(" reasoning effort")); c.append(l);
+  const seg = el("div", "mp-seg");
+  for (const o of opts) {                              // already ascending: left = less
+    const b = el("button", o === cur ? "sel" : "");
+    b.textContent = o;
+    b.addEventListener("click", () => setRoomEffort(k, o));
+    seg.append(b);
+  }
+  c.append(seg); return c;
+}
+
+async function setRoomEffort(k, effort) {
+  if (!STATE.room) return;
+  const map = { ...(STATE.room.reasoning_effort || {}), [k]: effort };
+  STATE.room.reasoning_effort = map;                                   // effective next turn
+  if (_popoverFor) showModelPopover(_popoverFor.k, _popoverFor.rect);  // re-highlight in place
+  try { await api(`/rooms/${STATE.room.id}`, "PUT", { reasoning_effort: map }); } catch (e) { /* non-fatal */ }
+}
+
+function squareInfo(k, spend) {
+  const raw = spend.per[k] || 0;
+  return { raw, pct: spend.total ? Math.round(raw / spend.total * 100) : 0, approx: spend.approx,
+           cost: spend.cost[k] || 0, ctxUsed: forwardTokenEstimate() };
+}
+
+// a per-model context-fill ring: the speaker dot centred in a coloured ring whose
+// arc = forward-context tokens ÷ THIS model's window, ramping green→amber→red. The
+// ring is the trigger surface for Wave-5 per-model compaction (it reads the same
+// window data). No window known → just the bare dot.
+function ringClass(r) { return r < 0.6 ? "ok" : r < 0.85 ? "warn" : "crit"; }
+function contextRing(ratio) {
+  const ns = "http://www.w3.org/2000/svg";
+  const r = 8, circ = 2 * Math.PI * r;
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "ctx-ring"); svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("width", "18"); svg.setAttribute("height", "18");
+  const mk = (cls) => { const c = document.createElementNS(ns, "circle");
+    c.setAttribute("cx", "10"); c.setAttribute("cy", "10"); c.setAttribute("r", "" + r);
+    c.setAttribute("fill", "none"); c.setAttribute("class", cls); return c; };
+  const bg = mk("ctx-ring-bg");
+  const fg = mk("ctx-ring-fg " + ringClass(ratio));
+  fg.setAttribute("stroke-dasharray", "" + circ);
+  fg.setAttribute("stroke-dashoffset", "" + (circ * (1 - Math.max(0, Math.min(1, ratio)))));
+  fg.setAttribute("transform", "rotate(-90 10 10)");
+  svg.append(bg, fg); return svg;
+}
+// the window the ring calibrates to: the EFFECTIVE routed window (Phase 24) when
+// resolved from OR, else the configured/headline window.
+function effectiveWindow(k) {
+  const p = providerOf(k) || {};
+  return p.effective_window || p.context_window || 0;
+}
+function tileGlyph(k, ctxUsed) {
+  const p = providerOf(k);
+  const color = p ? p.color : DOT_DEFAULT;
+  const win = effectiveWindow(k);
+  const wrap = el("span", "tile-glyph");
+  if (win) wrap.append(contextRing(ctxUsed / win));   // ring vs THIS model's effective window
+  wrap.append(dot(color));                             // dot centred over the ring
+  return wrap;
+}
+
+// a small red dot beside the popover's Context cell when the routed window is reduced
+// from the headline, or the headline changed since seeding (Phase 24). null otherwise.
+function windowDot(k) {
+  const p = providerOf(k) || {};
+  if (!p.window_reduced && !p.window_changed) return null;
+  const d = el("span", "win-dot");
+  if (p.window_changed)
+    d.title = `headline changed: was ${fmtTokens(p.context_window)}, now ${fmtTokens(p.headline_window)}`;
+  else
+    d.title = `routed window ${fmtTokens(p.effective_window)} < headline ${fmtTokens(p.headline_window)} — ring uses ${fmtTokens(p.effective_window)}`;
+  return d;
+}
+
+let _popoverFor = null, _popHideTimer = null;
+function renderModelBar() {
   const bar = $("#token-bar"); if (!bar) return;
   bar.innerHTML = "";
-  if (!STATE.room || !roomRoster().length) return;
-  const showTok = STATE.ui.show_token_estimate !== false;   // default on
-  const showPct = !!STATE.ui.show_model_pct;                 // default off
-  const fill = estimateContextTokens();
-  const { per, total, approx } = modelPercents();
+  if (!STATE.room || !roomRoster().length) { hideModelPopover(); return; }
+  const spend = modelPercents();
+  const ctxUsed = forwardTokenEstimate();
   for (const k of roomRoster()) {
-    const p = providerOf(k);
-    const win = p && p.context_window ? p.context_window : 0;
-    const chip = el("span", "tchip");
-    chip.append(dot(p ? p.color : DOT_DEFAULT));
-    let txt = k;
-    if (showTok) txt += ` ~${fmtTokens(fill)}${win ? " / " + fmtTokens(win) : ""}`;
-    if (showPct) txt += ` ${approx ? "~" : ""}${total ? Math.round((per[k] || 0) / total * 100) : 0}%`;
-    const s = el("span"); s.textContent = txt; chip.append(s); bar.append(chip);
+    const sq = el("span", "model-square"); sq.dataset.model = k;
+    sq.append(tileGlyph(k, ctxUsed));               // context-fill ring + speaker dot
+    const n = el("span"); n.textContent = fmtTokens(spend.per[k] || 0); sq.append(n);
+    sq.addEventListener("mouseenter", () => showModelPopover(k, sq.getBoundingClientRect()));
+    sq.addEventListener("mouseleave", scheduleHidePopover);
+    sq.addEventListener("click", () => showModelPopover(k, sq.getBoundingClientRect()));   // touch
+    bar.append(sq);
   }
-  // session total: real usage where the API gave it, estimate otherwise (~).
-  let tot = 0, approx2 = false, any = false;
-  for (const t of STATE.turns) {
-    const u = t.meta && t.meta.usage;
-    if (!u) continue;
-    any = true; tot += (u.input || 0) + (u.output || 0);
-    if (!u.exact) approx2 = true;
-  }
-  if (any) {
-    const s = el("span", "tchip total");
-    s.textContent = `session ${approx2 ? "~" : ""}${fmtTokens(tot)} tok`;
+  if (spend.total) {
+    const s = el("span", "session-total");
+    s.textContent = `session ${spend.approx ? "~" : ""}${fmtTokens(spend.total)} tok`
+      + (spend.anyCost ? ` · ${fmtCost(spend.totalCost)}` : "");
     bar.append(s);
   }
+}
+
+function scheduleHidePopover() { clearTimeout(_popHideTimer); _popHideTimer = setTimeout(hideModelPopover, 180); }
+function hideModelPopover() { clearTimeout(_popHideTimer); $("#model-popover").classList.add("hidden"); _popoverFor = null; }
+function showModelPopover(k, rect) {
+  clearTimeout(_popHideTimer);
+  const pop = $("#model-popover"); pop.innerHTML = "";
+  _popoverFor = { k, rect };
+  const info = squareInfo(k, modelPercents());
+  pop.append(popoverHeader(k));                     // dot + name + via-subtitle
+  const eff = effortSection(k); if (eff) pop.append(eff);
+  const stats = el("div", "mp-stats");             // divider + one-line rows
+  for (const cell of STAT_CELLS) stats.append(mpRow(cell.label, cell.val(k, info), cell.note ? cell.note(k) : null));
+  pop.append(stats);
+  pop.classList.remove("hidden");
+  // anchor ABOVE the square (the bar sits at the bottom), clamped to the viewport
+  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - pop.offsetWidth - 12)) + "px";
+  pop.style.top = Math.max(8, rect.top - pop.offsetHeight - 8) + "px";
+  pop.onmouseenter = () => clearTimeout(_popHideTimer);   // stay open while hovering the popover
+  pop.onmouseleave = scheduleHidePopover;
 }
 
 // ===== sidebar ===============================================================
@@ -528,6 +718,19 @@ function applyUI() {
   sb.style.width = (STATE.ui.sidebar_width || 260) + "px";
   sb.classList.toggle("collapsed", !!STATE.ui.sidebar_collapsed);
   $("#sidebar-expand").classList.toggle("hidden", !STATE.ui.sidebar_collapsed);
+  applyComposerHeight();
+}
+
+// composer (the model-bar + mode + input zone) height — dragged via #composer-resizer,
+// persisted to ui.json like the sidebar/margin sizes. The input textarea flexes to fill.
+function composerClamp(h) {
+  return Math.max(110, Math.min(Math.round(window.innerHeight * 0.6), h));
+}
+function applyComposerHeight() {
+  const c = document.querySelector(".composer");
+  if (!c) return;
+  const h = STATE.ui.composer_height;
+  if (h) c.style.height = composerClamp(h) + "px";   // unset → natural height
 }
 
 function renderSidebar() {
@@ -600,6 +803,7 @@ function adoptRoom(view) {
     margin_model: view.margin_model || null,
     splitter_width: view.splitter_width || null,
     tags: view.tags || [],
+    reasoning_effort: view.reasoning_effort || {},
   };
   STATE.turns = view.turns || [];
   if (view.margin_turns !== undefined) STATE.marginTurns = view.margin_turns || [];
@@ -615,6 +819,7 @@ async function markRead(id, count) {
 
 async function switchRoom(id) {
   banner(null); setStatus("");   // a background round's status must not bleed across rooms
+  STATE.staged = []; renderStagedFiles();   // staged files belong to the room you left
   try {
     const view = await api(`/rooms/${id}/activate`, "POST");   // sets active + marks read
     adoptRoom(view);
@@ -633,27 +838,121 @@ async function newRoom() {
   } catch (e) { banner(e.message); }
 }
 
+// ===== attached files (Phase 22) =============================================
+// Drag-drop / pick a .md / .txt onto the composer; it stages as a removable chip
+// and, on send, becomes a file-turn (text = the file content) the panel reads —
+// the way you load files at the start of a claude.ai / Grok chat. Text only: the
+// allowlist mirrors the engine (TEXT_EXTS / MAX_FILE_BYTES); richer formats need
+// extraction and stay out.
+const FILE_EXTS = [".md", ".txt"];
+const MAX_FILE_BYTES = 1_000_000;
+function fileExt(name) { const n = (name || "").toLowerCase(); const i = n.lastIndexOf("."); return i >= 0 ? n.slice(i) : ""; }
+function fileAllowed(name) { return FILE_EXTS.includes(fileExt(name)); }
+function humanSize(n) { return n < 1024 ? n + " B" : (n / 1024).toFixed(n < 1024 * 10 ? 1 : 0) + " KB"; }
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("read failed"));
+    r.readAsText(file);
+  });
+}
+
+async function stageFiles(fileList) {
+  for (const f of Array.from(fileList || [])) {
+    if (!fileAllowed(f.name)) { banner(`text files only for now (.md / .txt) — skipped ${f.name}`); continue; }
+    if (f.size > MAX_FILE_BYTES) { banner(`${f.name} is too large (max 1 MB) — skipped`); continue; }
+    try { STATE.staged.push({ filename: f.name, content: await readTextFile(f) }); }
+    catch (e) { banner(`could not read ${f.name}: ${e.message}`); }
+  }
+  renderStagedFiles();
+}
+
+function renderStagedFiles() {
+  const box = $("#staged-files");
+  box.innerHTML = "";
+  if (!STATE.staged.length) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  STATE.staged.forEach((f, i) => {
+    const chip = el("span", "file-chip");
+    const nm = el("span", "file-chip-name"); nm.textContent = "📎 " + f.filename; chip.append(nm);
+    const sz = el("span", "file-chip-size"); sz.textContent = humanSize(f.content.length); chip.append(sz);
+    const x = el("button", "file-chip-x"); x.textContent = "✕"; x.title = "remove";
+    x.addEventListener("click", () => { STATE.staged.splice(i, 1); renderStagedFiles(); });
+    chip.append(x); box.append(chip);
+  });
+}
+
+// A file-turn renders as a collapsed chip (filename + size), expanding to the
+// content via a SAFE path: .md through the sanitized renderer, anything else as
+// textContent — never innerHTML of raw file text.
+function renderFileTurn(t) {
+  const meta = t.meta || {};
+  const div = el("div", "turn human file-turn");
+  const head = el("button", "file-turn-head");
+  const caret = el("span", "file-turn-caret"); caret.textContent = "▸";
+  const name = el("span", "file-turn-name"); name.textContent = "📎 " + (meta.filename || "file");
+  const size = el("span", "file-turn-size"); size.textContent = humanSize(meta.size || 0);
+  head.append(caret, name, size);
+  const bodyWrap = el("div", "file-turn-body hidden");
+  const content = (t.text || "").replace(/^\[file:[^\]]*\]\n\n/, "");   // strip the header
+  if (fileExt(meta.filename || "") === ".md") renderMd(bodyWrap, content);
+  else { const pre = el("pre", "file-turn-pre"); pre.textContent = content; bodyWrap.append(pre); }
+  head.addEventListener("click", () => {
+    const show = bodyWrap.classList.contains("hidden");
+    bodyWrap.classList.toggle("hidden", !show);
+    caret.textContent = show ? "▾" : "▸";
+  });
+  div.append(head, bodyWrap);
+  return div;
+}
+
 // ===== compose ===============================================================
 function currentMode() { return document.querySelector('input[name="mode"]:checked').value; }
 
 async function send() {
   const input = $("#input"); const text = input.value.trim();
-  if (!text) return;
+  const hasFiles = STATE.staged.length > 0;
+  if (!text && !hasFiles) return;
   if (!STATE.room) { banner("Create a room first (+ new room)."); return; }
   const mode = currentMode();
-  const roomId = STATE.room.id;            // the room this message belongs to
+  const roomId = STATE.room.id;            // the message + files belong to this room
   banner(null);
+  // Validate the message round UP FRONT (before attaching files) so a misconfigured
+  // research send doesn't half-commit the attachments.
+  let panel, judge;
+  if (text && mode === "research") {
+    panel = pickedPanel();
+    if (!panel.length) { banner("select at least one model for the research panel (or set the room's models)"); return; }
+    judge = $("#judge-pick").value;
+    if (!judge) { banner("select a judge for this round (or set one in “models”)"); return; }
+  }
   // Note: the send button is deliberately NOT globally disabled. A round may be
   // in flight in room A while the user switches to B and sends there; each send
   // captures its own roomId and the server serializes per-room. Disabling here
   // would defeat multi-room concurrency.
   try {
+    // 1. flush staged files first — file-turns precede the message turn, so the
+    //    panel reads "here's the document, now my question".
+    if (hasFiles) {
+      const files = STATE.staged.map((f) => ({ filename: f.filename, content: f.content }));
+      setStatus(`attaching ${files.length} file${files.length === 1 ? "" : "s"}…`, true);
+      const fdata = await api(`/rooms/${roomId}/files`, "POST", { files });
+      STATE.staged = []; renderStagedFiles();
+      if (!text) {                           // files-only send: no model call
+        if (STATE.room && STATE.room.id === fdata.room_id) {
+          adoptRoom(fdata.transcript);
+          await markRead(roomId, fdata.transcript.turn_count);
+          setStatus("");
+        }
+        await refreshRooms();
+        return;
+      }
+    }
+    // 2. the message turn (+ its model round)
     let data;
     if (mode === "research") {
-      const panel = pickedPanel();
-      if (!panel.length) { banner("select at least one model for the research panel (or set the room's models)"); return; }
-      const judge = $("#judge-pick").value;
-      if (!judge) { banner("select a judge for this round (or set one in “models”)"); return; }
       setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} working + ${judge} synthesizes…`, true);
       data = await api(`/rooms/${roomId}/research`, "POST", { prompt: text, effort: $("#effort").value, panel, judge });
     } else {
@@ -810,6 +1109,23 @@ async function promoteMargin(turnId) {
 
 // ===== wiring ================================================================
 $("#send-btn").addEventListener("click", send);
+// attach files: pick (button → hidden input) or drop onto the composer (Phase 22)
+$("#attach-btn").addEventListener("click", () => $("#file-input").click());
+$("#file-input").addEventListener("change", (e) => { stageFiles(e.target.files); e.target.value = ""; });
+(function wireFileDrop() {
+  const composer = document.querySelector(".composer"); if (!composer) return;
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ["dragenter", "dragover"].forEach((ev) => composer.addEventListener(ev, (e) => { stop(e); composer.classList.add("dropping"); }));
+  ["dragleave", "drop"].forEach((ev) => composer.addEventListener(ev, (e) => {
+    stop(e);
+    if (ev === "dragleave" && composer.contains(e.relatedTarget)) return;   // still inside → keep highlight
+    composer.classList.remove("dropping");
+  }));
+  composer.addEventListener("drop", (e) => {
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) stageFiles(files);
+  });
+})();
 $("#margin-toggle").addEventListener("click", () => (STATE.marginOpen ? closeMargin() : openMargin()));
 $("#margin-close").addEventListener("click", closeMargin);
 $("#margin-send").addEventListener("click", marginSend);
@@ -867,12 +1183,44 @@ $("#sidebar-expand").addEventListener("click", () => setUI({ sidebar_collapsed: 
   });
 })();
 
+// transcript ↔ composer divider: drag the Y axis to resize the composer height.
+// The bar sits at the viewport bottom, so height ≈ innerHeight − cursorY (clamped).
+(function wireComposerResizer() {
+  const rez = $("#composer-resizer"); if (!rez) return;
+  const composer = document.querySelector(".composer");
+  let dragging = false;
+  rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const h = composerClamp(window.innerHeight - e.clientY);
+    STATE.ui.composer_height = h; composer.style.height = h + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return; dragging = false;
+    api("/ui", "PUT", { composer_height: STATE.ui.composer_height }).catch(() => {});
+  });
+})();
+
 // ===== model-management panel (Phase 7; unchanged behaviour) =================
 async function refreshParticipants() {
   const part = await api("/participants");
   STATE.participants = part.participants || [];
   STATE.globalJudge = part.research_judge || STATE.globalJudge;
   renderComposerPickers(); render();
+  reseedChangedWindows();   // fire-and-forget: keep the seeded window current (Phase 24)
+}
+
+// When a fresh /models headline differs from the seeded config window, re-seed it once
+// (so the "changed" dot clears next refresh). Guarded per-key per session — a single
+// PUT per genuine change, never a loop. The "reduced" dot (effective < headline) stays.
+const _reseeded = new Set();
+async function reseedChangedWindows() {
+  for (const p of STATE.participants) {
+    if (p.window_changed && p.headline_window && !_reseeded.has(p.name)) {
+      _reseeded.add(p.name);
+      try { await api(`/providers/${p.name}`, "PUT", { context_window: p.headline_window }); } catch (e) { /* non-fatal */ }
+    }
+  }
 }
 
 function providerCard(p) {
@@ -1003,10 +1351,30 @@ function providerCard(p) {
   return card;
 }
 
+// OR model catalog for the add-a-model dropdown — fetched once per overlay open
+// (best-effort; reuses the server-side cached /models). Populates the datalist and
+// is consulted on add to seed metadata defaults (window, reasoning).
+let _orModels = [];
+async function loadOrModels() {
+  const dl = $("#add-model-list"); if (!dl) return;
+  try {
+    const { models } = await api("/or-models");
+    _orModels = models || [];
+    dl.innerHTML = "";
+    _orModels.forEach((m) => {
+      const o = el("option"); o.value = m.id;
+      const win = m.context_length ? ` · ${fmtTokens(m.context_length)} ctx` : "";
+      o.label = m.id + win;                               // shown beside the id where supported
+      dl.append(o);
+    });
+  } catch (e) { _orModels = []; }                          // no OR key → typed id still works
+}
+
 async function openProviders() {
   const data = await api("/providers");
   const list = $("#provider-list"); list.innerHTML = "";
   data.providers.forEach((p) => list.append(providerCard(p)));
+  loadOrModels();                                          // populate the add-model dropdown (async, non-blocking)
   $("#judge-select").innerHTML = data.providers
     .map((p) => `<option value="${p.name}"${p.name === data.research_judge ? " selected" : ""}>${p.name}</option>`).join("");
   $("#export-dir").value = "";        // empty by default — the stored path is the "current:" line
@@ -1039,8 +1407,6 @@ $("#artifacts-save").addEventListener("click", async () => {
   const e = $(sel); if (e) e.addEventListener("focus", () => e.select());
 });
 
-$("#chip-tokens").addEventListener("change", (e) => _chipToggle("show_token_estimate", e.target.checked));
-$("#chip-pct").addEventListener("change", (e) => _chipToggle("show_model_pct", e.target.checked));
 $("#display-name-save").addEventListener("click", async () => {
   const v = $("#display-name").value.trim();
   STATE.ui.display_name = v;
@@ -1102,13 +1468,6 @@ function renderThemeControls() {
     async (v) => { STATE.ui.font_scale = v; applyFontScale(v); renderThemeControls();
                    try { await api("/ui", "PUT", { font_scale: v }); } catch (e) {} });
   $("#display-name").value = STATE.ui.display_name || "";
-  $("#chip-tokens").checked = STATE.ui.show_token_estimate !== false;
-  $("#chip-pct").checked = !!STATE.ui.show_model_pct;
-}
-
-async function _chipToggle(key, checked) {
-  STATE.ui[key] = checked; renderTokenBar();
-  try { await api("/ui", "PUT", { [key]: checked }); } catch (e) { /* non-fatal */ }
 }
 
 $("#export-save").addEventListener("click", async () => {
@@ -1135,8 +1494,17 @@ $("#judge-select").addEventListener("change", async (e) => {
   try { await api("/research-judge", "PUT", { name: e.target.value }); } catch (err) { banner(err.message); }
 });
 $("#add-btn").addEventListener("click", async () => {
+  const model = $("#add-model").value.trim();
   const body = { name: $("#add-name").value.trim(), base_url: $("#add-base").value.trim(),
-                 model: $("#add-model").value.trim(), api_key: $("#add-key").value || null };
+                 model, api_key: $("#add-key").value || null };
+  // OR-dropdown pick → metadata-seeded defaults (window + reasoning), and default the
+  // base_url to OpenRouter when picking an OR model into an empty base.
+  const meta = _orModels.find((m) => m.id === model);
+  if (meta) {
+    if (meta.context_length) body.context_window = meta.context_length;
+    body.reasoning = !!meta.reasoning;
+    if (!body.base_url) body.base_url = "https://openrouter.ai/api/v1";
+  }
   if (!body.name || !body.base_url) { banner("name and base_url required"); return; }
   try {
     await api("/providers", "POST", body);

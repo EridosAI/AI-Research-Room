@@ -83,6 +83,7 @@ def _default_meta(room_id: str, title: str) -> dict:
         "splitter_width": None,
         "last_read_pos": 0,
         "tags": [],           # user-set; written into the exported .md frontmatter
+        "reasoning_effort": {},   # {panelist_key: "high"|"medium"|"low"} overrides; empty = model default
         "ts": _now(),
     }
 
@@ -141,7 +142,7 @@ def load_room(room_id: str) -> dict:
 
 
 _MUTABLE = {"title", "participants", "judge", "margin_model",
-            "splitter_width", "last_read_pos", "tags"}
+            "splitter_width", "last_read_pos", "tags", "reasoning_effort"}
 
 
 def update_room(room_id: str, **fields) -> dict:

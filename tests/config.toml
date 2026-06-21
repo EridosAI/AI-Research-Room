@@ -52,6 +52,25 @@ enabled    = false
 web_search = true
 color      = "#86efac"
 
+[providers.or_test]       # OpenRouter-base row (Phase 20) — gives the effort selector its options.
+auth_mode = "api"         # disabled by default; the model-bar test adds it to a room explicitly.
+backend   = "openai"
+base_url  = "https://openrouter.ai/api/v1"
+model     = "z-ai/glm-5.2"
+enabled   = false
+reasoning = true
+supported_efforts = ["high", "xhigh"]   # config override (ascending) — GLM-style, NOT the old trio
+color     = "#fca5a5"
+
+[providers.or_search]     # OpenRouter row with web search ON (Phase 23) — the no-search guard
+auth_mode  = "api"        # must NOT fire for this seat. Disabled; the guard test stubs httpx.
+backend    = "openai"
+base_url   = "https://openrouter.ai/api/v1"
+model      = "z-ai/glm-5.2"
+enabled    = false
+web_search = true
+color      = "#86efac"
+
 [providers.grok_proxy]    # Grok via the Hermes xAI-OAuth proxy (Phase 19) — openai-compatible,
 auth_mode  = "api"        # localhost sidecar. Disabled by default; the phase-19 test stubs httpx.
 backend    = "openai"

@@ -26,6 +26,27 @@ def _is_openrouter(provider) -> bool:
     return "openrouter.ai" in (provider.base_url or "")
 
 
+def _extract_reasoning(msg: dict) -> str | None:
+    """Pull the visible reasoning from a chat message, across shapes:
+    - OpenRouter `reasoning_details` (array of {type, text/summary, …}) — preferred;
+      render reasoning.summary + reasoning.text, SKIP reasoning.encrypted (redacted).
+    - OpenRouter flat `reasoning` string (fallback).
+    - direct providers' `reasoning_content` (DeepSeek/Kimi)."""
+    details = msg.get("reasoning_details")
+    if isinstance(details, list) and details:
+        parts = []
+        for d in details:
+            if not isinstance(d, dict) or d.get("type") == "reasoning.encrypted":
+                continue                                  # encrypted = redacted; skip cleanly
+            t = (d.get("text") or d.get("summary") or "").strip()
+            if t:
+                parts.append(t)
+        if parts:
+            return "\n\n".join(parts)
+    s = (msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
+    return s or None
+
+
 def _openrouter_search(data: dict) -> dict | None:
     """Normalize OpenRouter web-search provenance from the message's `url_citation`
     annotations into the shared {searches, citations} shape. OpenRouter exposes no
@@ -47,15 +68,16 @@ def _openrouter_search(data: dict) -> dict | None:
 
 
 def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None,
-         reasoning: bool = False, web_search: bool = False
+         reasoning: bool = False, web_search: bool = False, reasoning_effort: str | None = None
          ) -> tuple[str, str | None, dict | None, str | None, dict | None, str | None]:
     """Returns (answer_text, reasoning_or_None, usage_or_None, served_model_or_None,
-    search_or_None, finish_reason_or_None). When `reasoning` is on, enable the model's thinking mode
-    (DeepSeek's documented switch) and capture `message.reasoning_content`. When
-    `web_search` is on AND the base_url is OpenRouter, attach OpenRouter's
-    `web_search` server tool (it runs the loop server-side) and normalize the
-    returned `url_citation` annotations into the search trace. usage is exact token
-    counts if provided; served_model is the response's top-level `model`."""
+    search_or_None, finish_reason_or_None). When `reasoning` is on: OpenRouter rows get the
+    unified `reasoning: {enabled, effort}` param (OR maps it to each backend incl. Claude's
+    adaptive API — fixing the Opus-4.8 budget_tokens trap); direct providers keep the
+    DeepSeek `thinking`/`reasoning_effort` switch. Reasoning is captured from
+    reasoning_details/reasoning/reasoning_content (see _extract_reasoning). When
+    `web_search` is on AND OpenRouter, attach the server-side search tool + normalize
+    citations. usage = exact token counts if provided; served_model = response `model`."""
     if not key:
         raise RuntimeError(f"no API key configured for '{provider.key}'")
     url = f"{provider.base_url}/chat/completions"
@@ -65,12 +87,22 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
         "max_tokens": max_tokens or settings.CONVERSE_MAX_TOKENS,
     }
     if reasoning:
-        body["thinking"] = {"type": "enabled"}     # DeepSeek: enable the thinking mode
-        body["reasoning_effort"] = "high"
+        if _is_openrouter(provider):
+            # OR's uniform reasoning param — maps to every backend's native API.
+            body["reasoning"] = {"enabled": True}
+            if reasoning_effort:
+                body["reasoning"]["effort"] = reasoning_effort
+        else:
+            body["thinking"] = {"type": "enabled"}     # DeepSeek-direct: enable thinking mode
+            body["reasoning_effort"] = reasoning_effort or "high"
     if web_search and _is_openrouter(provider):
         # OpenRouter's server-side web search tool. The legacy `:online` suffix and
         # `web` plugin are deprecated; this is the current path. Verify at wire time.
         body.setdefault("tools", []).append({"type": "openrouter:web_search"})
+    if _is_openrouter(provider):
+        # ask OR to include the authoritative per-request USD cost in usage.cost
+        # (reflects the actual provider route; no price table needed our side).
+        body["usage"] = {"include": True}
     try:
         r = httpx.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=TIMEOUT)
         r.raise_for_status()
@@ -83,12 +115,116 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
     msg = choice.get("message") or {}
     text = (msg.get("content") or "").strip()
     finish = choice.get("finish_reason") or None   # openai vocab: stop | length | tool_calls | content_filter
-    rc = (msg.get("reasoning_content") or "").strip() if reasoning else ""
+    rc = _extract_reasoning(msg) if reasoning else None
     u = data.get("usage") or {}
-    usage = ({"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
-             if u else None)
+    usage = None
+    if u:
+        usage = {"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
+        if u.get("cost") is not None:                  # OpenRouter's authoritative USD cost
+            usage["cost"] = u["cost"]
     search = (_openrouter_search(data) if web_search and _is_openrouter(provider) else None)
-    return text, (rc or None), usage, (data.get("model") or None), search, finish
+    return text, rc, usage, (data.get("model") or None), search, finish
+
+
+# OpenRouter's effort vocabulary (none < low < medium < high < xhigh), ascending —
+# the fallback ladder for reasoning-capable models that DON'T enumerate efforts.
+_OR_LADDER = ["none", "low", "medium", "high", "xhigh"]
+
+
+def _parse_effort_catalog(data: dict) -> dict:
+    """From a /models payload → {model_id: [supported_efforts ASCENDING]} for
+    reasoning-capable models. A model counts as reasoning-capable if it has a
+    `reasoning` object OR `supported_parameters` includes "reasoning". Then:
+      - `reasoning.supported_efforts` is a non-empty list → that list, REVERSED
+        (OR returns highest-first; the UI reads left = less);
+      - efforts null/absent but reasoning is supported → OR's ladder (the
+        adaptive case — e.g. Claude returns `reasoning: {"mandatory": false}`
+        with no efforts; it still accepts effort values, so offer the ladder);
+      - not reasoning-capable at all → omitted (no selector)."""
+    out: dict[str, list] = {}
+    items = data.get("data", data if isinstance(data, list) else [])
+    for m in items:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        rinfo = m.get("reasoning")
+        params = m.get("supported_parameters")
+        reasoning_capable = isinstance(rinfo, dict) or (
+            isinstance(params, list) and "reasoning" in params)
+        if not reasoning_capable:
+            continue
+        effs = rinfo.get("supported_efforts") if isinstance(rinfo, dict) else None
+        if isinstance(effs, list) and effs:
+            out[m["id"]] = list(reversed(effs))      # enumerated → ascending
+        else:
+            out[m["id"]] = list(_OR_LADDER)          # reasoning-capable but unenumerated
+    return out
+
+
+def reasoning_catalog(provider, key: str | None) -> dict:
+    """GET {base}/models → {model_id: ascending efforts} (best-effort; caller caches)."""
+    if not key:
+        raise RuntimeError("no API key configured")
+    r = httpx.get(f"{provider.base_url}/models",
+                  headers={"Authorization": f"Bearer {key}"}, timeout=TIMEOUT)
+    r.raise_for_status()
+    return _parse_effort_catalog(r.json())
+
+
+def _top_provider_context(m: dict) -> int:
+    cl = (m.get("top_provider") or {}).get("context_length")
+    return int(cl) if cl else 0
+
+
+def _model_context_length(m: dict) -> int:
+    """The HEADLINE window: the model object's `context_length`, falling back to the
+    default route's window when the headline is absent."""
+    cl = m.get("context_length") or _top_provider_context(m)
+    return int(cl) if cl else 0
+
+
+def model_catalog(provider, key: str | None) -> list[dict]:
+    """GET {base}/models → a list of {id, context_length, effective_window, reasoning,
+    supported_efforts} for the add-a-model dropdown + the context gauge. `context_length`
+    is the HEADLINE window; `effective_window` is the default route's window
+    (`top_provider.context_length`) — often equal, but smaller on multi-provider
+    open-weight models (Phase 24). Sorted by id; reasoning/efforts come from the same
+    parse as the effort selector, so a picked row seeds consistently with its popover."""
+    if not key:
+        raise RuntimeError("no API key configured")
+    r = httpx.get(f"{provider.base_url}/models",
+                  headers={"Authorization": f"Bearer {key}"}, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    eff = _parse_effort_catalog(data)
+    items = data.get("data", data if isinstance(data, list) else [])
+    out = []
+    for m in items:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        out.append({
+            "id": m["id"],
+            "context_length": _model_context_length(m),       # headline
+            "effective_window": _top_provider_context(m),     # default route (0 = unknown inline)
+            "reasoning": m["id"] in eff,
+            "supported_efforts": eff.get(m["id"]),
+        })
+    out.sort(key=lambda d: d["id"])
+    return out
+
+
+def endpoints_min_window(provider, model: str, key: str | None) -> int:
+    """GET {base}/models/{author}/{slug}/endpoints → the MIN context_length across the
+    providers OR would route to (the conservative floor) — used only when the inline
+    `top_provider.context_length` is absent. 0 when unknown/unavailable."""
+    if not key:
+        raise RuntimeError("no API key configured")
+    r = httpx.get(f"{provider.base_url}/models/{model}/endpoints",
+                  headers={"Authorization": f"Bearer {key}"}, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    eps = ((data.get("data") or {}).get("endpoints")) or []
+    wins = [e.get("context_length") for e in eps if isinstance(e, dict) and e.get("context_length")]
+    return int(min(wins)) if wins else 0
 
 
 def list_models(provider, key: str | None) -> list[str]:

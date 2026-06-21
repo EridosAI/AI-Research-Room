@@ -116,11 +116,13 @@ class RoomUpdate(BaseModel):
     splitter_width: float | None = None
     last_read_pos: int | None = None
     tags: list[str] | None = None
+    reasoning_effort: dict | None = None   # {panelist_key: "high"|"medium"|"low"} per-room overrides
 
 
 class UIBody(BaseModel):
     sidebar_collapsed: bool | None = None
     sidebar_width: float | None = None
+    composer_height: float | None = None   # dragged transcript↔composer split (px)
     export_dir: str | None = None   # Obsidian export folder; "" = off
     accent_hue: float | None = None   # theme accent hue (oklch degrees)
     theme_mode: str | None = None     # dark | light | system
@@ -130,6 +132,15 @@ class UIBody(BaseModel):
     show_token_estimate: bool | None = None   # token-chip: ~X / Y fill piece
     show_model_pct: bool | None = None        # token-chip: per-model spend share
     artifacts_dir: str | None = None          # where to auto-write markdown artifacts; "" = off
+
+
+class FileItem(BaseModel):
+    filename: str
+    content: str
+
+
+class FilesBody(BaseModel):
+    files: list[FileItem]   # staged .md/.txt; each becomes a file-turn (no model call)
 
 
 class MarginBody(BaseModel):
@@ -149,6 +160,8 @@ class ProviderCreate(BaseModel):
     auth_mode: str = "api"
     backend: str = "openai"
     api_key: str | None = None   # write-only
+    context_window: int | None = None   # seeded from the OR model dropdown (fill gauge window)
+    reasoning: bool | None = None        # seeded from the OR model dropdown (reasoning-capable)
 
 
 class ProviderUpdate(BaseModel):
@@ -186,6 +199,25 @@ def _status(name: str, p: providers.Provider) -> str:
     return ("ok" if lt["ok"] else "error") if lt else "ready"
 
 
+def _effort_options(p: providers.Provider) -> list[str] | None:
+    """Reasoning-effort choices for the model-square selector (ASCENDING), per-model
+    from OpenRouter's /models metadata (config override wins). None → no selector
+    (proxy-Grok / direct / non-reasoning rows)."""
+    return providers.effort_options(p)
+
+
+def _window_view(p: providers.Provider) -> dict:
+    """The context gauge's window facts for the UI: the effective routed window the ring
+    calibrates to, the headline window, and the reduced/changed flags (Phase 24).
+    Best-effort — never let a metadata lookup fail the participants list."""
+    try:
+        w = providers.window_info(p)
+    except Exception:  # noqa: BLE001
+        w = {"effective": p.context_window or 0, "headline": None, "reduced": False, "changed": False}
+    return {"effective_window": w["effective"], "headline_window": w["headline"],
+            "window_reduced": w["reduced"], "window_changed": w["changed"]}
+
+
 def _provider_view(name: str, p: providers.Provider) -> dict:
     return {
         "name": name,
@@ -198,6 +230,7 @@ def _provider_view(name: str, p: providers.Provider) -> dict:
         "color": p.color,
         "reasoning": p.reasoning,
         "web_search": p.web_search,
+        "effort_options": _effort_options(p),
         "context_window": p.context_window,
         "key_last4": None if p.auth_mode == "cli" else secrets.last4(name),
         "status": _status(name, p),
@@ -249,6 +282,7 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "margin_model": meta.get("margin_model"),
         "splitter_width": meta.get("splitter_width"),
         "tags": meta.get("tags", []),
+        "reasoning_effort": meta.get("reasoning_effort", {}),
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,
@@ -293,7 +327,8 @@ def _maybe_artifacts(room_id: str, text: str) -> None:
         pass
 
 
-_UI_DEFAULT = {"sidebar_collapsed": False, "sidebar_width": 260, "export_dir": "",
+_UI_DEFAULT = {"sidebar_collapsed": False, "sidebar_width": 260, "composer_height": None,
+               "export_dir": "",
                "accent_hue": 233,            # navy default
                "theme_mode": "dark",         # dark (default) | light | system
                "text_brightness": "default", "font_scale": "default", "display_name": "",
@@ -321,7 +356,9 @@ def get_participants() -> dict:
     """Speaker colours + addressee list for the UI. No secrets — not guarded."""
     return {"participants": [
         {"name": k, "color": p.color, "enabled": p.enabled, "auth_mode": p.auth_mode,
-         "context_window": p.context_window}
+         "model": p.model, "base_url": p.base_url,
+         "context_window": p.context_window, "effort_options": _effort_options(p),
+         **_window_view(p)}
         for k, p in providers.registry().items()
     ], "research_judge": providers.research_judge()}
 
@@ -433,6 +470,28 @@ def room_converse(room_id: str, body: ConverseBody) -> dict:
     return {"reply": reply, "room_id": room_id, "transcript": view}
 
 
+# ---- attached files (Phase 22) ----------------------------------------------
+@app.post("/rooms/{room_id}/files")
+def post_files(room_id: str, body: FilesBody) -> dict:
+    """Append staged .md/.txt files as file-turns (no model call) — the content rides
+    turn.text into forward context. Emitted BEFORE the message turn the client sends
+    next, so the panel reads 'here's the document, now my question'. Empty-message
+    sends (files only) are allowed: the client just doesn't follow with research/
+    converse. Takes the MAIN room lock — it's a main.jsonl write."""
+    _require_room(room_id)
+    if not body.files:
+        raise HTTPException(400, "no files")
+    with _room_lock(room_id):
+        try:
+            for f in body.files:
+                modes.attach_file(room_id, f.filename, f.content)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        view = _full_room(room_id)
+    _maybe_export(room_id)
+    return {"room_id": room_id, "transcript": view}
+
+
 # ---- margin (the in-room side-channel; Phase 10) ----------------------------
 @app.post("/rooms/{room_id}/margin")
 def post_margin(room_id: str, body: MarginBody) -> dict:
@@ -515,10 +574,18 @@ def create_provider(body: ProviderCreate) -> dict:
         raise HTTPException(400, "name and base_url required")
     with _lock:
         key = providers.create_provider(body.name, body.base_url, body.model,
-                                        auth_mode=body.auth_mode, backend=body.backend)
+                                        auth_mode=body.auth_mode, backend=body.backend,
+                                        context_window=body.context_window, reasoning=body.reasoning)
         if body.api_key:
             secrets.set(key, body.api_key)
     return _provider_view(key, providers.provider(key))
+
+
+@app.get("/or-models", dependencies=[Depends(localhost_only)])
+def or_models() -> dict:
+    """OpenRouter model catalog (id + context_length + reasoning + efforts) for the
+    add-a-model dropdown. [] when no OR row has a key — the UI falls back to a typed id."""
+    return {"models": providers.or_model_catalog()}
 
 
 @app.delete("/providers/{name}", dependencies=[Depends(localhost_only)])

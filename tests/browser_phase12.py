@@ -80,13 +80,13 @@ def main():
             assert page.eval_on_selector("#input", "el => el.value") == "", "input should clear after send"
             print("Enter OK: Enter sent the message")
 
-            # --- Feature B: token chip + session total ---
-            page.wait_for_selector("#token-bar .tchip")
+            # --- Feature B: model-square bar + session total (Phase 20 replaced the chip line) ---
+            page.wait_for_selector("#token-bar .model-square")
+            assert page.locator('#token-bar .model-square[data-model="mock"]').count() == 1, "mock square missing"
             bar = page.locator("#token-bar").inner_text()
-            assert "mock" in bar and "128k" in bar, f"fill chip ~X / 128k missing: {bar!r}"
-            assert "~" in bar, f"estimate not ~-prefixed: {bar!r}"
             assert "session" in bar, f"session total missing: {bar!r}"
-            print(f"token chip OK: {bar!r}")
+            assert "~" in bar, f"mock estimate not ~-prefixed: {bar!r}"
+            print(f"model bar OK: {bar!r}")
 
             # --- Feature A UI: export folder + room tags round-trip ---
             page.click("#providers-btn")

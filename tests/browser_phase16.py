@@ -76,17 +76,18 @@ def main():
             footer = page.locator(".round .turn-footer").first
             assert footer.locator(".reasoning-toggle").count() == 1, "footer missing the thinking toggle"
             assert footer.locator(".model-pill").count() == 1, "footer missing the model pill (beside thinking)"
-            print("render OK: 'model' pill sits beside 'thinking' in the turn footer")
+            print("render OK: model pill sits beside 'thinking' in the turn footer")
 
-            # --- the pill's title equals the API-reported served model ---
+            # --- the pill SHOWS the served model id (glanceable), title carries the full string ---
             turns = _json(f"/rooms/{rid}")["turns"]
             served = next(t["meta"]["served_model"] for t in turns
                           if (t.get("meta") or {}).get("served_model"))
+            short = served.split("/")[-1]
             pill = page.locator(".round .model-pill").first
-            assert pill.inner_text().strip() == "model", f"pill label not 'model': {pill.inner_text()!r}"
-            assert pill.get_attribute("title") == served, \
-                f"pill title {pill.get_attribute('title')!r} != served {served!r}"
-            print(f"title OK: pill reveals served model on hover ({served!r})")
+            assert pill.inner_text().strip() == short, f"pill should show the served id {short!r}, got {pill.inner_text()!r}"
+            assert served in (pill.get_attribute("title") or ""), \
+                f"pill title should carry the served model: {pill.get_attribute('title')!r}"
+            print(f"label OK: pill shows the served model id ({short!r})")
 
             # (context-isolation of served_model is an engine concern — covered directly in
             # engine_phase11 via the SERVED_SECRET_X build_context assertion.)
@@ -95,8 +96,10 @@ def main():
             assert page.evaluate("modelPill({meta:{model:'cfg'}}) === null"), \
                 "pill should be absent when served_model is absent"
             assert page.evaluate("modelPill({meta:{}}) === null"), "pill should be absent on empty meta"
-            assert page.evaluate("modelPill({meta:{served_model:'srv-x'}}).getAttribute('title')") == "srv-x", \
-                "pill title should equal served_model"
+            assert page.evaluate("modelPill({meta:{served_model:'vendor/srv-x'}}).textContent") == "srv-x", \
+                "pill should show the served id with the provider/ prefix stripped"
+            assert "vendor/srv-x" in page.evaluate("modelPill({meta:{served_model:'vendor/srv-x'}}).getAttribute('title')"), \
+                "pill title should carry the full served model"
             assert page.evaluate(
                 "modelPill({meta:{model:'a',served_model:'b'}}).classList.contains('mismatch')"), \
                 "mismatch (config != served) should tint the pill"
