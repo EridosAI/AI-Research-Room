@@ -158,18 +158,26 @@
             <select id="mode" title="interaction pattern">
               <option value="converse" selected>converse</option>
               <option value="fusion">fusion</option>
+              <option value="mapping">mapping</option>
               <option value="side_by_side">side-by-side</option>
+              <option value="yes_and">yes-and</option>
             </select>
             <span id="converse-opts">→ <select id="addressee" title="addressed model"></select></span>
             <span id="research-opts" class="hidden">effort
               <select id="effort"><option>low</option><option selected>medium</option><option>high</option></select>
-              judge <select id="judge-pick" title="who synthesizes this round"></select>
+              judge <select id="judge-pick" title="who synthesizes / maps this round"></select>
+              <label class="mode" title="panelists read the room history (still independent of each other)"><input type="checkbox" id="panel-context" /> panel sees conversation</label>
               <span id="panel-pick" class="panel-pick"></span>
             </span>
             <span id="sxs-opts" class="hidden">effort
               <select id="sxs-effort"><option>low</option><option selected>medium</option><option>high</option></select>
               judge <select id="sxs-judge" title="who writes the divergence note"></select>
+              <label class="mode" title="panelists read the room history (still independent of each other)"><input type="checkbox" id="sxs-context" /> panel sees conversation</label>
               <span id="sxs-pick" class="panel-pick" title="pick exactly two models"></span>
+            </span>
+            <span id="yesand-opts" class="hidden">effort
+              <select id="ya-effort"><option>low</option><option selected>medium</option><option>high</option></select>
+              <span class="hint">A <select id="ya-a" title="first responder"></select> → B <select id="ya-b" title="builds on A"></select></span>
             </span>
           </div>
           <div id="staged-files" class="staged-files hidden"></div>

@@ -68,7 +68,8 @@ def main():
 
             # --- selector lists the three modes ---
             opts = page.eval_on_selector_all("#mode option", "els => els.map(e => e.value)")
-            assert opts == ["converse", "fusion", "side_by_side"], f"mode options: {opts}"
+            # Phase 25's three modes are present (Phase 26 adds mapping + yes-and).
+            assert {"converse", "fusion", "side_by_side"} <= set(opts), f"mode options: {opts}"
             print("selector OK: lists converse · fusion · side-by-side")
 
             # --- params reveal contextually ---

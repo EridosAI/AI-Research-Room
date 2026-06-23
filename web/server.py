@@ -108,13 +108,14 @@ class RunBody(BaseModel):
     """The mode-selection object + prompt (Phase 25). One dispatch endpoint over every
     interaction pattern; the UI dropdown is its v1 producer (a future trajectory-graph
     is a second producer of the same shape). Selection is decoupled from execution."""
-    mode: str                          # "converse" | "fusion" | "side_by_side"
+    mode: str                          # converse | fusion | mapping | side_by_side | yes_and
     prompt: str
     effort: str = "medium"
     target: str | None = None          # converse: addressed seat
-    panel: list[str] | None = None     # fusion: per-round panel (None = all participants)
-    seats: list[str] | None = None     # side_by_side: the two seats
-    judge: str | None = None           # fusion / side_by_side: judge override
+    panel: list[str] | None = None     # fusion / mapping: per-round panel (None = all participants)
+    seats: list[str] | None = None     # side_by_side / yes_and: the two seats (yes_and = ordered)
+    judge: str | None = None           # fusion / mapping / side_by_side: judge override
+    panel_context: str | None = None   # panel modes: "blind" (default) | "transcript" toggle
 
 
 class RoomCreate(BaseModel):
@@ -493,21 +494,27 @@ def room_run(room_id: str, body: RunBody) -> dict:
     _require_room(room_id)
     if not body.prompt.strip():
         raise HTTPException(400, "prompt required")
-    seln = body.panel if body.mode == "fusion" else (body.seats or [])
-    for who in (seln or []) + ([body.judge] if body.judge else []) + ([body.target] if body.target else []):
+    for who in (body.panel or []) + (body.seats or []) + \
+            ([body.judge] if body.judge else []) + ([body.target] if body.target else []):
         if who not in providers.registry():
             raise HTTPException(400, f"unknown provider: {who}")
+    label = _load_ui().get("display_name") or "human"
     with _room_lock(room_id):
         try:
             if body.mode == "converse":
-                result = modes.converse(room_id, body.prompt, addressed_to=body.target,
-                                        human_label=(_load_ui().get("display_name") or "human"))
+                result = modes.converse(room_id, body.prompt, addressed_to=body.target, human_label=label)
             elif body.mode == "fusion":
-                result = modes.research(room_id, body.prompt, panel=body.panel,
-                                        judge=body.judge, effort=body.effort)
+                result = modes.research(room_id, body.prompt, panel=body.panel, judge=body.judge,
+                                        effort=body.effort, panel_context=body.panel_context)
+            elif body.mode == "mapping":
+                result = modes.mapping(room_id, body.prompt, panel=body.panel, judge=body.judge,
+                                       effort=body.effort, panel_context=body.panel_context)
             elif body.mode == "side_by_side":
-                result = modes.side_by_side(room_id, body.prompt, seats=body.seats or [],
-                                            judge=body.judge, effort=body.effort)
+                result = modes.side_by_side(room_id, body.prompt, seats=body.seats or [], judge=body.judge,
+                                            effort=body.effort, panel_context=body.panel_context)
+            elif body.mode == "yes_and":
+                result = modes.yes_and(room_id, body.prompt, seats=body.seats or [],
+                                       effort=body.effort, human_label=label)
             else:
                 raise HTTPException(400, f"unknown mode: {body.mode}")
         except (FileNotFoundError, ValueError) as e:

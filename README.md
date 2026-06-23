@@ -42,13 +42,22 @@ Two layers, cleanly split:
 - **Interaction patterns as rounds + a gate.** A *mode* is an ordered list of *rounds*
   (`participants` all/subset/one/judge · `context` blind/transcript · `flow` · `instruction`
   prompt-modifier · `role` ai/ai-raw/judge) executed by one `run_mode` — no per-mode state
-  machine. **Converse**, **Fusion** (blind panel → judge synthesis), and **Side-by-side** (two
-  answers + a "where they differ" divergence note, no merge) all fold into the same executor;
-  new patterns are new round-specs, not new code paths. A single `#mode` selector reveals each
-  mode's params contextually and dispatches a **mode-selection object** to one `/run` endpoint —
-  selection is decoupled from execution (a future trajectory-graph is a second producer of the
-  same object). The invariant holds by construction: a round's `instruction` is a prompt-modifier
-  (never serialized forward), and `ai-raw` panel answers stay out of forward context.
+  machine. The live patterns all fold into the same executor — new patterns are new round-specs,
+  not new code paths:
+  - **Converse** — one model answers, seeing the room's synthesis-only forward context.
+  - **Fusion** — blind parallel panel → a judge **synthesizes** one answer.
+  - **Mapping** — blind panel → a judge **exposes** the landscape (consensus / divergences-mapped /
+    unique signal / takeaway), no merge, no winner.
+  - **Side-by-side** — two answers + a "where they differ" **divergence** note.
+  - **Yes-and** — A answers, then B builds on A ("yes, and") seeing A via forward context.
+
+  A single `#mode` selector reveals each mode's params contextually and dispatches a **mode-selection
+  object** to one `/run` endpoint — selection is decoupled from execution (a future trajectory-graph
+  is a second producer of the same object). Panel modes carry a **blind/transcript toggle** ("panel
+  sees conversation" — panelists may read room history but stay independent of each other), and each
+  judge turn shows a **mode-aware label** (Synthesis / Map / Divergence). The invariant holds by
+  construction: a round's `instruction` is a prompt-modifier (never serialized forward), and `ai-raw`
+  panel answers stay out of forward context regardless of the context toggle.
 - **Blind panel + judge.** Panelists never see each other's work; only the judge's
   synthesis flows forward into later turns. Raw panel answers are kept for the record and
   the UI's "view full", but are filtered out of model context — the **synthesis-only
@@ -362,6 +371,8 @@ python tests/engine_phase24.py         # effective routed window (top_provider/e
 python tests/browser_phase24.py        # ring calibrates to effective window + reduced/changed popover dot
 python tests/engine_phase25.py         # round/mode framework + side-by-side: ai-raw isolation, degrade, fallback
 python tests/browser_phase25.py        # unified mode selector + contextual params + side-by-side via /run
+python tests/engine_phase26.py         # mapping + yes-and + panel context toggle (ai-raw kept) + judge_kind
+python tests/browser_phase26.py        # mapping/yes-and in the selector, contextual params, mode-aware labels
 ```
 
 ## Environment

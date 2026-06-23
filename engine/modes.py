@@ -44,6 +44,15 @@ JUDGE_SYSTEM = (
     "Synthesize their answers into a single, higher-quality final answer."
 )
 
+# The standard fusion OUTPUT instruction (was hardcoded in _build_judge_prompt; now the
+# fusion judge round carries it, so the prompt stays byte-identical post-Phase-26).
+FUSION_OUTPUT = (
+    "Lead with the FINAL ANSWER (the deliverable). Then an AUDIT TRAIL per the "
+    "rubric track, attributing each point to the panelist that raised it. Any "
+    "panelist listed absent above failed or was dropped — treat it as absent, "
+    "never as silent agreement."
+)
+
 # Side-by-side (Phase 25): the judge does NOT synthesize — it reports divergence so the
 # reader can choose which full answer to read. A distinct system (JUDGE_SYSTEM would fight
 # "do not merge") + a distinct output instruction.
@@ -55,6 +64,29 @@ DIVERGENCE_NOTE = (
     "The answers to the same task are above. Produce ONLY a brief note of where they differ "
     "— the key points of divergence — so the reader can choose which full answer to read. "
     "Do not merge them and do not pick a winner."
+)
+
+# Mapping (Phase 26): fusion's panel, but the judge EXPOSES the landscape (four-part map)
+# instead of merging. Rubric in references/mapping_rubric.md; a neutral-self system note so
+# a judge that is also a panelist treats its own answer as one voice among many.
+MAPPING_SYSTEM = (
+    "You are MAPPING several independent expert answers to the SAME task in a multi-model "
+    "room. Expose the landscape of agreement and disagreement; do NOT merge them into one "
+    "answer and do NOT pick a winner. If one of the answers below is your own, treat it as "
+    "one voice among many — neutral, never self-favoring."
+)
+MAPPING_OUTPUT = (
+    "Output the MAP in the four sections from the guidance above — Consensus, Divergences, "
+    "Unique signal, Takeaway. Map the divergences (the positions AND why they differ), don't "
+    "merely list that they exist; do not merge into one answer and do not pick a winner."
+)
+
+# Yes-and (Phase 26): B builds on A. A panelist prompt-modifier (like PANEL_INSTRUCTION),
+# appended to B's transcript-aware payload — A's answer is already a forward turn B sees.
+YES_AND_INSTRUCTION = (
+    "The previous expert's answer is above. Respond in the spirit of 'yes, and' — accept it "
+    "and build: extend it with what they missed, a complementary angle, or a next step. Add, "
+    "don't merely agree or restate; don't contradict or critique. This is additive."
 )
 
 
@@ -70,6 +102,9 @@ class Round:
     max_tokens: int | None = None
     degrade: bool = True         # failure → absence + abort-if-all-fail (panel); False → propagate (converse)
     system: str | None = None    # judge system override (judge rounds)
+    rubric_file: str | None = None  # judge HOW-TO-JUDGE rubric file (references/), if any
+    judge_kind: str | None = None   # judge turn label kind: synthesis | map | divergence
+    seat: int | None = None      # "one" rounds: index into selection["seats"] (yes-and's ordered pair)
 
 
 @dataclass(frozen=True)
@@ -82,7 +117,8 @@ class Mode:
 
 FUSION_MODE = Mode("fusion", "research", (
     Round("all", "blind", "parallel", PANEL_INSTRUCTION, "ai-raw", degrade=True),
-    Round("judge", None, "parallel", "", "judge", degrade=False),
+    Round("judge", None, "parallel", FUSION_OUTPUT, "judge", degrade=False,
+          rubric_file="judge_rubric.md", judge_kind="synthesis"),
 ), "single")
 
 CONVERSE_MODE = Mode("converse", "converse", (
@@ -91,10 +127,25 @@ CONVERSE_MODE = Mode("converse", "converse", (
 
 SIDE_BY_SIDE_MODE = Mode("side_by_side", "research", (
     Round("subset", "blind", "parallel", PANEL_INSTRUCTION, "ai-raw", degrade=True),
-    Round("judge", None, "parallel", DIVERGENCE_NOTE, "judge", degrade=False, system=SIDE_SYSTEM),
+    Round("judge", None, "parallel", DIVERGENCE_NOTE, "judge", degrade=False,
+          system=SIDE_SYSTEM, judge_kind="divergence"),
 ), "single")
 
-MODES = {m.name: m for m in (FUSION_MODE, CONVERSE_MODE, SIDE_BY_SIDE_MODE)}
+# Mapping: fusion's panel, a judge that EXPOSES (four-part map) instead of merging.
+MAPPING_MODE = Mode("mapping", "research", (
+    Round("all", "blind", "parallel", PANEL_INSTRUCTION, "ai-raw", degrade=True),
+    Round("judge", None, "parallel", MAPPING_OUTPUT, "judge", degrade=False,
+          system=MAPPING_SYSTEM, rubric_file="mapping_rubric.md", judge_kind="map"),
+), "single")
+
+# Yes-and: two transcript ai rounds (an ordered pair). B sees A via forward context — A's
+# turn is a normal forward `ai` turn, so build_context shows it to B (no intra-round thread).
+YES_AND_MODE = Mode("yes_and", "converse", (
+    Round("one", "transcript", "parallel", "", "ai", tools=False, degrade=False, seat=0),
+    Round("one", "transcript", "parallel", YES_AND_INSTRUCTION, "ai", tools=False, degrade=False, seat=1),
+), "single")
+
+MODES = {m.name: m for m in (FUSION_MODE, CONVERSE_MODE, SIDE_BY_SIDE_MODE, MAPPING_MODE, YES_AND_MODE)}
 
 
 # ---- attached files (Phase 22) ----------------------------------------------
@@ -177,11 +228,13 @@ def _reply_meta(reply) -> dict:
 
 
 def _build_judge_prompt(task: str, answers: list[tuple[str, str]],
-                        absent: list[tuple[str, str]], instruction: str | None = None) -> str:
+                        absent: list[tuple[str, str]], *, rubric_file: str | None = None,
+                        instruction: str | None = None) -> str:
     """The judge sees the task + every prior answer's TEXT (never reasoning) + absences.
-    `instruction` is the judge round's output guidance: None → the synthesis rubric +
-    standard fusion output (byte-identical to the pre-framework prompt); a string → that
-    text as the OUTPUT section (e.g. side-by-side's divergence note)."""
+    `rubric_file` (references/) → a HOW-TO-JUDGE section; `instruction` → the OUTPUT
+    section. Fusion passes judge_rubric.md + FUSION_OUTPUT → byte-identical to the
+    pre-framework prompt; mapping passes mapping_rubric.md + MAPPING_OUTPUT; side-by-side
+    passes only the divergence-note instruction (no rubric)."""
     parts = ["===== ORIGINAL TASK =====", task, "", "===== PANEL ANSWERS ====="]
     for speaker, text in answers:
         parts += [f"--- Panelist: {speaker} ---", text, ""]
@@ -189,20 +242,14 @@ def _build_judge_prompt(task: str, answers: list[tuple[str, str]],
         parts += ["===== ABSENT PANELISTS (failed/dropped — NOT agreement) ====="]
         parts += [f"- {s}: {err}" for s, err in absent]
         parts += [""]
-    if instruction is None:
-        rubric_file = settings.REFS_DIR / "judge_rubric.md"
-        rubric = rubric_file.read_text(encoding="utf-8") if rubric_file.is_file() else (
+    if rubric_file:
+        rf = settings.REFS_DIR / rubric_file
+        rubric = rf.read_text(encoding="utf-8") if rf.is_file() else (
             "(rubric missing — synthesize: consensus, contradictions, partial coverage, "
             "unique insights, blind spots; for code, merge into one working artifact.)"
         )
-        parts += ["===== HOW TO JUDGE =====", rubric, "", "===== OUTPUT ====="]
-        parts.append(
-            "Lead with the FINAL ANSWER (the deliverable). Then an AUDIT TRAIL per the "
-            "rubric track, attributing each point to the panelist that raised it. Any "
-            "panelist listed absent above failed or was dropped — treat it as absent, "
-            "never as silent agreement."
-        )
-    else:
+        parts += ["===== HOW TO JUDGE =====", rubric, ""]
+    if instruction:
         parts += ["===== OUTPUT =====", instruction]
     return "\n".join(parts)
 
@@ -223,15 +270,23 @@ def _resolve_participants(rnd: Round, selection: dict, room: dict, target: str |
     if rnd.participants == "subset":
         return list(selection["seats"])
     if rnd.participants == "one":
+        if rnd.seat is not None:                          # yes-and's ordered pair: pick by index
+            return [selection["seats"][rnd.seat]]
         return [target]
     return list(selection.get("panel") or room["participants"])      # "all"
 
 
 def _round_payload(rnd: Round, speaker: str, prompt: str, doc_block: str,
-                   path, room: dict, human_label: str) -> dict:
-    if rnd.context == "transcript":
-        return build_context(transcript.load(path), speaker, "converse",
-                             participants=room["participants"], human_label=human_label)
+                   path, room: dict, human_label: str, context: str | None) -> dict:
+    """Build one seat's payload for a round. `context` is the EFFECTIVE context (the
+    round's, or the panel_context toggle override) — transcript → build_context (+ the
+    round instruction appended), blind → prompt + docs + instruction only."""
+    if context == "transcript":
+        ctx = build_context(transcript.load(path), speaker, "converse",
+                            participants=room["participants"], human_label=human_label)
+        if rnd.instruction:                               # e.g. yes-and / a transcript panel
+            ctx["messages"][-1]["content"] += f"\n\n---\n{rnd.instruction}"
+        return ctx
     # blind: prompt + attached docs + the round's instruction only (no transcript)
     return {"system": "", "messages": [
         {"role": "user", "content": f"{doc_block}{prompt}\n\n---\n{rnd.instruction}"}]}
@@ -258,7 +313,8 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
     # a single-seat target (converse): resolve for the human-turn meta + the "one" round
     target = selection.get("target")
     if mode.turn_mode == "converse" and not target:
-        target = (transcript.last_ai_speaker(path)
+        target = ((selection.get("seats") or [None])[0]            # yes-and: A is the addressee
+                  or transcript.last_ai_speaker(path)
                   or (room["participants"] or providers.enabled() or providers.provider_keys())[0])
 
     human_meta = {"addressed_to": target} if mode.turn_mode == "converse" else {"round_id": round_id}
@@ -271,9 +327,12 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
         if rnd.role == "judge":
             judge = selection.get("judge") or room["judge"]
             jpayload = {"system": rnd.system or JUDGE_SYSTEM, "messages": [
-                {"role": "user", "content": _build_judge_prompt(prompt, prior, absent,
-                                                                rnd.instruction or None)}]}
+                {"role": "user", "content": _build_judge_prompt(
+                    prompt, prior, absent, rubric_file=rnd.rubric_file,
+                    instruction=(rnd.instruction or None))}]}
             meta: dict = {"round_id": round_id}
+            if rnd.judge_kind:
+                meta["judge_kind"] = rnd.judge_kind        # UI label: synthesis | map | divergence
             judge_used = judge
             try:
                 reply = _call_judge(judge, jpayload, effort, efforts.get(judge))
@@ -290,18 +349,23 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
             last = reply.text
             continue
 
-        # ai / ai-raw round
+        # ai / ai-raw round. Panel rounds (ai-raw) honour the blind/transcript toggle
+        # (params.panel_context); a transcript-aware panel READS forward context but its
+        # answers STAY ai-raw (excluded from forward context) — reads, never writes.
         speakers = _resolve_participants(rnd, selection, room, target)
+        eff_ctx = rnd.context
+        if rnd.role == "ai-raw" and selection.get("panel_context"):
+            eff_ctx = selection["panel_context"]
         if rnd.degrade:
             with ThreadPoolExecutor(max_workers=max(1, len(speakers))) as ex:
                 results = list(ex.map(
-                    lambda s: _panelist(s, _round_payload(rnd, s, prompt, doc_block, path, room, human_label),
+                    lambda s: _panelist(s, _round_payload(rnd, s, prompt, doc_block, path, room, human_label, eff_ctx),
                                         effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens),
                     speakers))
         else:   # non-degrading single seat (converse): a failure propagates, as before
             s0 = speakers[0]
             reply0 = providers.call_model(
-                s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label),
+                s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label, eff_ctx),
                 tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0))
             results = [(s0, reply0, None)]
 
@@ -327,9 +391,11 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
 
 # ---- wrappers (thin mode-specs over run_mode; signatures preserved) ---------
 def research(room_id: str, prompt: str, panel: list[str] | None = None,
-             judge: str | None = None, effort: str = "medium") -> str:
-    """Fusion: blind parallel panel + a judge synthesis. Degrades gracefully (a failed
-    panelist → absent, never silent agreement; abort only if zero return)."""
+             judge: str | None = None, effort: str = "medium",
+             panel_context: str | None = None) -> str:
+    """Fusion: a parallel panel + a judge synthesis. Degrades gracefully (a failed
+    panelist → absent, never silent agreement; abort only if zero return). `panel_context`
+    (blind/transcript, default blind) is the per-mode panel-sees-conversation toggle."""
     room = rooms.load_room(room_id)
     panel = panel if panel is not None else room["participants"]
     judge = judge or room["judge"]
@@ -337,7 +403,8 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
         raise ValueError("no panelists selected for this room")
     if not judge:
         raise ValueError("no judge selected for this room")
-    return run_mode(room_id, FUSION_MODE, prompt, {"panel": panel, "judge": judge}, effort=effort)
+    return run_mode(room_id, FUSION_MODE, prompt,
+                    {"panel": panel, "judge": judge, "panel_context": panel_context}, effort=effort)
 
 
 def converse(room_id: str, prompt: str, addressed_to: str | None = None,
@@ -355,9 +422,10 @@ def converse(room_id: str, prompt: str, addressed_to: str | None = None,
 
 
 def side_by_side(room_id: str, prompt: str, seats: list[str],
-                 judge: str | None = None, effort: str = "medium") -> str:
-    """Two seats answer the same task blind (ai-raw); the judge produces a short
-    divergence note (does NOT merge) so the reader can choose which full answer to read."""
+                 judge: str | None = None, effort: str = "medium",
+                 panel_context: str | None = None) -> str:
+    """Two seats answer the same task (ai-raw); the judge produces a short divergence note
+    (does NOT merge) so the reader can choose which full answer to read."""
     room = rooms.load_room(room_id)
     judge = judge or room["judge"]
     if not seats or len(seats) != 2:
@@ -367,4 +435,35 @@ def side_by_side(room_id: str, prompt: str, seats: list[str],
     for s in seats:
         providers.provider(s)          # validate each; raises ValueError if unknown
     return run_mode(room_id, SIDE_BY_SIDE_MODE, prompt,
-                    {"seats": list(seats), "judge": judge}, effort=effort)
+                    {"seats": list(seats), "judge": judge, "panel_context": panel_context}, effort=effort)
+
+
+def mapping(room_id: str, prompt: str, panel: list[str] | None = None,
+            judge: str | None = None, effort: str = "medium",
+            panel_context: str | None = None) -> str:
+    """Fusion's blind panel, but the judge EXPOSES the landscape (consensus / divergences /
+    unique signal / takeaway) instead of merging — same rails, swapped judge guidance."""
+    room = rooms.load_room(room_id)
+    panel = panel if panel is not None else room["participants"]
+    judge = judge or room["judge"]
+    if not panel:
+        raise ValueError("no panelists selected for this room")
+    if not judge:
+        raise ValueError("no judge selected for this room")
+    return run_mode(room_id, MAPPING_MODE, prompt,
+                    {"panel": panel, "judge": judge, "panel_context": panel_context}, effort=effort)
+
+
+def yes_and(room_id: str, prompt: str, seats: list[str], effort: str = "medium",
+            human_label: str = "human") -> str:
+    """Two transcript rounds, an ordered pair: A answers seeing the room; B answers seeing
+    the room INCLUDING A's turn (A's answer is a normal forward turn, so build_context shows
+    it to B). Both forward (the user's next turn sees both)."""
+    if not seats or len(seats) != 2:
+        raise ValueError("yes-and needs exactly two models (an ordered pair: A then B)")
+    if seats[0] == seats[1]:
+        raise ValueError("yes-and needs two DIFFERENT models")
+    for s in seats:
+        providers.provider(s)          # validate each; raises ValueError if unknown
+    return run_mode(room_id, YES_AND_MODE, prompt, {"seats": list(seats)},
+                    effort=effort, human_label=human_label)

@@ -58,23 +58,21 @@ the blind payload). See [BUILD_amendment_phase22.md](BUILD_amendment_phase22.md)
 ## Interaction patterns on the round/mode rails (Phase 25 shipped the framework)
 
 Phase 25 made interaction patterns a category (rounds + a gate; one `run_mode`; selection decoupled
-from execution via the mode-selection object). Converse, Fusion, and Side-by-side are live. The rest
-are round-spec changes, not new code paths — see [BUILD_amendment_phase25.md](BUILD_amendment_phase25.md):
+from execution via the mode-selection object). **Phase 26** added Mapping, Yes-and, the blind/transcript
+panel toggle, and mode-aware judge labels — all config-level on the rails (see
+[BUILD_amendment_phase26.md](BUILD_amendment_phase26.md)). Live modes: Converse, Fusion, Mapping,
+Side-by-side, Yes-and. What's left:
 
-- **Mapping (26).** Fusion's mode with the judge instruction swapped to *expose* (consensus / divergence
-  / unique / takeaway — don't merge). Trivial on these rails: a new judge `instruction` + `system`.
-- **Yes-and (26).** `[{A, transcript, ai}, {B, transcript+A, sequential, yes-and, ai}]` — fills the
-  `flow: sequential` extension point declared in `run_mode` (currently parallel-only; no untested
-  sequential code shipped).
-- **Blind/transcript panel toggle (26).** Expose the round `context` flag as a per-mode user choice (the
-  panel may *read* forward context but stays `ai-raw` — reads, never writes). The framework already
-  supports it; the migration proves both contexts (converse=transcript, fusion=blind).
-- **Debate (later).** Any mode with the gate flipped to loop-until-N/conclusion (the `gate` field is
-  `single` today; `loop` is the future value).
+- **Source attribution (mapping) + a verification pass.** Both blocked on the SAME new plumbing: a
+  `meta`→judge **citations channel** that feeds the panel's web-search citations (which live in `meta`,
+  out of forward context) to the judge, so it can attribute each mapped point / verify claims against
+  sources. Build the channel once; mapping-attribution and verification both consume it.
+- **Debate (later).** Any panel mode with the gate flipped to loop-until-N/conclusion (`gate` is
+  `single` today; `loop` is the future value — the one piece `run_mode` doesn't yet implement).
 - **Trajectory graph.** A second producer of the mode-selection object — drag the next round's shape on
   the graph instead of via the dropdown. Same `/run` rails, no engine change.
-- **Mode-aware round label.** Side-by-side's judge turn currently renders in the "synthesis" slot; a
-  label that reads "divergence" for non-fusion judge rounds is deferred polish.
+- **`flow: sequential`.** Still declared but unfilled — yes-and didn't need it (B sees A via forward
+  context). Waits for a genuine intra-round-sequential mode (e.g. a relay panel); not on the roadmap.
 
 ## Considered and rejected (recorded so it isn't re-litigated)
 

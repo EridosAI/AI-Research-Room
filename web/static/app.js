@@ -412,7 +412,9 @@ function renderRound(b) {
     const syn = document.createElement("div"); syn.className = "synthesis";
     const n = b.panels.length;
     const ff = b.judge.meta && b.judge.meta.judge_fallback_from;
-    const extra = `synthesis · ${n} panelist${n === 1 ? "" : "s"}` + (ff ? ` · judge fell back from ${ff}` : "");
+    // mode-aware label: synthesis (fusion) | map (mapping) | divergence (side-by-side)
+    const kind = (b.judge.meta && b.judge.meta.judge_kind) || "synthesis";
+    const extra = `${kind} · ${n} panelist${n === 1 ? "" : "s"}` + (ff ? ` · judge fell back from ${ff}` : "");
     syn.appendChild(whoLine(b.judge.speaker, colorOf(b.judge.speaker), extra));
     const body = document.createElement("div"); renderMd(body, b.judge.text); syn.appendChild(body);
     appendTurnFooter(syn, b.judge);         // synthesis provenance: thinking + model
@@ -509,7 +511,24 @@ function renderSxsJudge() {
   sel.innerHTML = html || `<option value="" disabled selected>select…</option>`;
 }
 
-function renderComposerPickers() { renderAddressee(); renderPanelPick(); renderJudgePick(); renderSxsPick(); renderSxsJudge(); }
+// yes-and: an ordered pair (A → B) from the room roster.
+function renderYesAnd() {
+  const roster = roomRoster();
+  for (const id of ["#ya-a", "#ya-b"]) {
+    const sel = $(id); if (!sel) continue;
+    const cur = sel.value;
+    sel.innerHTML = roster.length
+      ? roster.map((k) => `<option value="${k}">${k}</option>`).join("")
+      : `<option value="" disabled selected>no models</option>`;
+    if (cur && roster.includes(cur)) sel.value = cur;
+  }
+  // sensible default: A = first, B = second (distinct) when nothing chosen yet
+  if (roster.length >= 2 && $("#ya-a") && $("#ya-a").value === $("#ya-b").value) $("#ya-b").value = roster[1];
+}
+
+function renderComposerPickers() {
+  renderAddressee(); renderPanelPick(); renderJudgePick(); renderSxsPick(); renderSxsJudge(); renderYesAnd();
+}
 
 // ===== token / context indicator =============================================
 function fmtTokens(n) {
@@ -942,28 +961,39 @@ function currentMode() { return $("#mode").value; }
 // trajectory-graph is a second producer of the same shape). Returns null + banners on a
 // validation miss. params reveal per mode (converse → target; fusion → panel+judge;
 // side-by-side → two seats + judge).
+function panelContext(checkboxSel) { return $(checkboxSel) && $(checkboxSel).checked ? "transcript" : "blind"; }
+
 function buildSelection(mode, text) {
-  if (mode === "fusion") {
+  if (mode === "fusion" || mode === "mapping") {     // shared panel params
     const panel = pickedPanel();
     if (!panel.length) { banner("select at least one model for the panel (or set the room's models)"); return null; }
     const judge = $("#judge-pick").value;
     if (!judge) { banner("select a judge for this round (or set one in “models”)"); return null; }
-    return { mode, prompt: text, effort: $("#effort").value, panel, judge };
+    return { mode, prompt: text, effort: $("#effort").value, panel, judge, panel_context: panelContext("#panel-context") };
   }
   if (mode === "side_by_side") {
     const seats = pickedSeats();
     if (seats.length !== 2) { banner("side-by-side needs exactly two models — pick two"); return null; }
     const judge = $("#sxs-judge").value;
     if (!judge) { banner("select a judge for the divergence note (or set one in “models”)"); return null; }
-    return { mode, prompt: text, effort: $("#sxs-effort").value, seats, judge };
+    return { mode, prompt: text, effort: $("#sxs-effort").value, seats, judge, panel_context: panelContext("#sxs-context") };
+  }
+  if (mode === "yes_and") {
+    const a = $("#ya-a").value, bb = $("#ya-b").value;
+    if (!a || !bb) { banner("yes-and needs two models (A then B)"); return null; }
+    if (a === bb) { banner("yes-and needs two DIFFERENT models for A and B"); return null; }
+    return { mode, prompt: text, effort: $("#ya-effort").value, seats: [a, bb] };
   }
   // converse
   return { mode, prompt: text, target: $("#addressee").value || null };
 }
 
 function modeStatus(sel) {
-  if (sel.mode === "fusion") return `fusion: ${sel.panel.length} model${sel.panel.length === 1 ? "" : "s"} working + ${sel.judge} synthesizes…`;
-  if (sel.mode === "side_by_side") return `side-by-side: ${sel.seats.join(" + ")} → ${sel.judge} notes divergence…`;
+  const ctx = sel.panel_context === "transcript" ? " (panel sees chat)" : "";
+  if (sel.mode === "fusion") return `fusion: ${sel.panel.length} model${sel.panel.length === 1 ? "" : "s"} working + ${sel.judge} synthesizes…${ctx}`;
+  if (sel.mode === "mapping") return `mapping: ${sel.panel.length} model${sel.panel.length === 1 ? "" : "s"} working + ${sel.judge} maps the landscape…${ctx}`;
+  if (sel.mode === "side_by_side") return `side-by-side: ${sel.seats.join(" + ")} → ${sel.judge} notes divergence…${ctx}`;
+  if (sel.mode === "yes_and") return `yes-and: ${sel.seats[0]} → ${sel.seats[1]} builds on it…`;
   return `converse: ${sel.target ? "@" + sel.target : "(last AI)"} responding…`;
 }
 
@@ -1024,8 +1054,9 @@ async function send() {
 function syncModeUI() {
   const m = currentMode();
   $("#converse-opts").classList.toggle("hidden", m !== "converse");
-  $("#research-opts").classList.toggle("hidden", m !== "fusion");
+  $("#research-opts").classList.toggle("hidden", m !== "fusion" && m !== "mapping");   // shared panel params
   $("#sxs-opts").classList.toggle("hidden", m !== "side_by_side");
+  $("#yesand-opts").classList.toggle("hidden", m !== "yes_and");
 }
 
 // ===== room settings (per-room roster + judge) ===============================
