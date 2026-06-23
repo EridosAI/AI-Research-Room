@@ -104,6 +104,19 @@ class ConverseBody(BaseModel):
     addressed_to: str | None = None
 
 
+class RunBody(BaseModel):
+    """The mode-selection object + prompt (Phase 25). One dispatch endpoint over every
+    interaction pattern; the UI dropdown is its v1 producer (a future trajectory-graph
+    is a second producer of the same shape). Selection is decoupled from execution."""
+    mode: str                          # "converse" | "fusion" | "side_by_side"
+    prompt: str
+    effort: str = "medium"
+    target: str | None = None          # converse: addressed seat
+    panel: list[str] | None = None     # fusion: per-round panel (None = all participants)
+    seats: list[str] | None = None     # side_by_side: the two seats
+    judge: str | None = None           # fusion / side_by_side: judge override
+
+
 class RoomCreate(BaseModel):
     title: str
 
@@ -468,6 +481,47 @@ def room_converse(room_id: str, body: ConverseBody) -> dict:
     _maybe_export(room_id)
     _maybe_artifacts(room_id, reply)
     return {"reply": reply, "room_id": room_id, "transcript": view}
+
+
+# ---- unified mode dispatch (Phase 25) ---------------------------------------
+@app.post("/rooms/{room_id}/run")
+def room_run(room_id: str, body: RunBody) -> dict:
+    """Execute one interaction pattern from a mode-selection object. Dispatches to the
+    mode wrappers (which build a mode-spec and call run_mode); converse / fusion /
+    side-by-side all flow through this one endpoint. Same degradation + 400/502 mapping
+    as the legacy /research + /converse endpoints (kept for back-compat)."""
+    _require_room(room_id)
+    if not body.prompt.strip():
+        raise HTTPException(400, "prompt required")
+    seln = body.panel if body.mode == "fusion" else (body.seats or [])
+    for who in (seln or []) + ([body.judge] if body.judge else []) + ([body.target] if body.target else []):
+        if who not in providers.registry():
+            raise HTTPException(400, f"unknown provider: {who}")
+    with _room_lock(room_id):
+        try:
+            if body.mode == "converse":
+                result = modes.converse(room_id, body.prompt, addressed_to=body.target,
+                                        human_label=(_load_ui().get("display_name") or "human"))
+            elif body.mode == "fusion":
+                result = modes.research(room_id, body.prompt, panel=body.panel,
+                                        judge=body.judge, effort=body.effort)
+            elif body.mode == "side_by_side":
+                result = modes.side_by_side(room_id, body.prompt, seats=body.seats or [],
+                                            judge=body.judge, effort=body.effort)
+            else:
+                raise HTTPException(400, f"unknown mode: {body.mode}")
+        except (FileNotFoundError, ValueError) as e:
+            raise HTTPException(400, str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(502, str(e)) from e
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+        view = _full_room(room_id)
+    _maybe_export(room_id)
+    _maybe_artifacts(room_id, result)
+    return {"result": result, "mode": body.mode, "room_id": room_id, "transcript": view}
 
 
 # ---- attached files (Phase 22) ----------------------------------------------

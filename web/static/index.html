@@ -155,13 +155,21 @@
         <footer class="composer">
           <div id="token-bar" class="model-bar"></div>
           <div class="composer-row">
-            <label class="mode"><input type="radio" name="mode" value="converse" checked /> converse</label>
-            <label class="mode"><input type="radio" name="mode" value="research" /> research</label>
+            <select id="mode" title="interaction pattern">
+              <option value="converse" selected>converse</option>
+              <option value="fusion">fusion</option>
+              <option value="side_by_side">side-by-side</option>
+            </select>
             <span id="converse-opts">→ <select id="addressee" title="addressed model"></select></span>
             <span id="research-opts" class="hidden">effort
               <select id="effort"><option>low</option><option selected>medium</option><option>high</option></select>
               judge <select id="judge-pick" title="who synthesizes this round"></select>
               <span id="panel-pick" class="panel-pick"></span>
+            </span>
+            <span id="sxs-opts" class="hidden">effort
+              <select id="sxs-effort"><option>low</option><option selected>medium</option><option>high</option></select>
+              judge <select id="sxs-judge" title="who writes the divergence note"></select>
+              <span id="sxs-pick" class="panel-pick" title="pick exactly two models"></span>
             </span>
           </div>
           <div id="staged-files" class="staged-files hidden"></div>

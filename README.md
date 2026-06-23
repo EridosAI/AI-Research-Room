@@ -39,8 +39,16 @@ Two layers, cleanly split:
 
 ## Why it's built this way
 
-- **One file, three call patterns.** Every mode is a pattern over a room's transcript and
-  a single `call_model` interface — no per-mode state machine.
+- **Interaction patterns as rounds + a gate.** A *mode* is an ordered list of *rounds*
+  (`participants` all/subset/one/judge · `context` blind/transcript · `flow` · `instruction`
+  prompt-modifier · `role` ai/ai-raw/judge) executed by one `run_mode` — no per-mode state
+  machine. **Converse**, **Fusion** (blind panel → judge synthesis), and **Side-by-side** (two
+  answers + a "where they differ" divergence note, no merge) all fold into the same executor;
+  new patterns are new round-specs, not new code paths. A single `#mode` selector reveals each
+  mode's params contextually and dispatches a **mode-selection object** to one `/run` endpoint —
+  selection is decoupled from execution (a future trajectory-graph is a second producer of the
+  same object). The invariant holds by construction: a round's `instruction` is a prompt-modifier
+  (never serialized forward), and `ai-raw` panel answers stay out of forward context.
 - **Blind panel + judge.** Panelists never see each other's work; only the judge's
   synthesis flows forward into later turns. Raw panel answers are kept for the record and
   the UI's "view full", but are filtered out of model context — the **synthesis-only
@@ -352,6 +360,8 @@ python tests/engine_phase23.py         # cost capture/isolation + no-search guar
 python tests/browser_phase23.py        # copy button + cost cell + converse effort + context rings + OR dropdown
 python tests/engine_phase24.py         # effective routed window (top_provider/endpoints-min) + reduced/changed flags
 python tests/browser_phase24.py        # ring calibrates to effective window + reduced/changed popover dot
+python tests/engine_phase25.py         # round/mode framework + side-by-side: ai-raw isolation, degrade, fallback
+python tests/browser_phase25.py        # unified mode selector + contextual params + side-by-side via /run
 ```
 
 ## Environment

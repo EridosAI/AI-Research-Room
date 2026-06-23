@@ -103,7 +103,7 @@ def main():
             print("ring OK: tile shows a context ring; ramp shifts ok→warn→crit")
 
             # --- 23.1 cost cell + 23.3 effort selector in CONVERSE mode ---
-            assert page.locator('input[name="mode"][value="converse"]').is_checked(), "default is converse"
+            assert page.eval_on_selector("#mode", "el => el.value") == "converse", "default mode is converse"
             page.locator('.model-square[data-model="or_test"]').click()           # OR seat popover
             page.wait_for_selector("#model-popover:not(.hidden)")
             pop = page.locator("#model-popover")

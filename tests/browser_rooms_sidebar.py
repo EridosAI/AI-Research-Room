@@ -71,7 +71,7 @@ def main():
             page.click("#new-room-btn")
             page.wait_for_selector('.room-row:has-text("my room")')
             assert page.locator("#title").inner_text() == "my room"
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             assert page.locator("#judge-pick").input_value() == "", "new room must not preselect a judge"
             page.fill("#input", "should be blocked")
             page.click("#send-btn")
@@ -118,7 +118,7 @@ def main():
             assert page.locator("#title").inner_text() == "my room", "active room not restored after reload"
             # roster reconstructed from room.json (not browser): expand + check picker
             page.click("#sidebar-expand")
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             assert page.locator("#panel-pick input[type=checkbox]").count() == 2, "room roster not restored after reload"
             assert page.evaluate("window.localStorage.length") == 0, "localStorage populated after reload"
             print("reload OK: sidebar width/collapse + active room roster restored from server, no browser storage")

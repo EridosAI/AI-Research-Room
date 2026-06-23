@@ -482,7 +482,34 @@ function renderJudgePick() {
   sel.innerHTML = html || `<option value="" disabled selected>select…</option>`;
 }
 
-function renderComposerPickers() { renderAddressee(); renderPanelPick(); renderJudgePick(); }
+// side-by-side: a two-seat picker (checkboxes from the room roster) + its own judge.
+function renderSxsPick() {
+  const box = $("#sxs-pick"); if (!box) return;
+  box.innerHTML = "";
+  const roster = roomRoster();
+  if (!roster.length) { box.append(document.createTextNode("· no models in this room — set them in “models”")); return; }
+  box.append(document.createTextNode("· two:"));
+  for (const k of roster) {
+    const p = providerOf(k);
+    const lab = el("label", "pickitem");
+    const cb = el("input"); cb.type = "checkbox"; cb.value = k;
+    lab.append(cb, dot(p ? p.color : DOT_DEFAULT), document.createTextNode(k));
+    box.append(lab);
+  }
+}
+function pickedSeats() { return [...document.querySelectorAll("#sxs-pick input:checked")].map((i) => i.value); }
+
+function renderSxsJudge() {
+  const sel = $("#sxs-judge"); if (!sel) return;
+  const roster = roomRoster();
+  const judge = STATE.room && STATE.room.judge;
+  let html = "";
+  if (!judge) html += `<option value="" disabled selected>select…</option>`;
+  html += roster.map((k) => `<option value="${k}"${k === judge ? " selected" : ""}>${k}</option>`).join("");
+  sel.innerHTML = html || `<option value="" disabled selected>select…</option>`;
+}
+
+function renderComposerPickers() { renderAddressee(); renderPanelPick(); renderJudgePick(); renderSxsPick(); renderSxsJudge(); }
 
 // ===== token / context indicator =============================================
 function fmtTokens(n) {
@@ -909,7 +936,36 @@ function renderFileTurn(t) {
 }
 
 // ===== compose ===============================================================
-function currentMode() { return document.querySelector('input[name="mode"]:checked').value; }
+function currentMode() { return $("#mode").value; }
+
+// Build the mode-selection object (the v1 producer of what /run consumes — a future
+// trajectory-graph is a second producer of the same shape). Returns null + banners on a
+// validation miss. params reveal per mode (converse → target; fusion → panel+judge;
+// side-by-side → two seats + judge).
+function buildSelection(mode, text) {
+  if (mode === "fusion") {
+    const panel = pickedPanel();
+    if (!panel.length) { banner("select at least one model for the panel (or set the room's models)"); return null; }
+    const judge = $("#judge-pick").value;
+    if (!judge) { banner("select a judge for this round (or set one in “models”)"); return null; }
+    return { mode, prompt: text, effort: $("#effort").value, panel, judge };
+  }
+  if (mode === "side_by_side") {
+    const seats = pickedSeats();
+    if (seats.length !== 2) { banner("side-by-side needs exactly two models — pick two"); return null; }
+    const judge = $("#sxs-judge").value;
+    if (!judge) { banner("select a judge for the divergence note (or set one in “models”)"); return null; }
+    return { mode, prompt: text, effort: $("#sxs-effort").value, seats, judge };
+  }
+  // converse
+  return { mode, prompt: text, target: $("#addressee").value || null };
+}
+
+function modeStatus(sel) {
+  if (sel.mode === "fusion") return `fusion: ${sel.panel.length} model${sel.panel.length === 1 ? "" : "s"} working + ${sel.judge} synthesizes…`;
+  if (sel.mode === "side_by_side") return `side-by-side: ${sel.seats.join(" + ")} → ${sel.judge} notes divergence…`;
+  return `converse: ${sel.target ? "@" + sel.target : "(last AI)"} responding…`;
+}
 
 async function send() {
   const input = $("#input"); const text = input.value.trim();
@@ -919,15 +975,10 @@ async function send() {
   const mode = currentMode();
   const roomId = STATE.room.id;            // the message + files belong to this room
   banner(null);
-  // Validate the message round UP FRONT (before attaching files) so a misconfigured
-  // research send doesn't half-commit the attachments.
-  let panel, judge;
-  if (text && mode === "research") {
-    panel = pickedPanel();
-    if (!panel.length) { banner("select at least one model for the research panel (or set the room's models)"); return; }
-    judge = $("#judge-pick").value;
-    if (!judge) { banner("select a judge for this round (or set one in “models”)"); return; }
-  }
+  // Build + validate the mode-selection object UP FRONT (before attaching files) so a
+  // misconfigured send doesn't half-commit the attachments.
+  let sel = null;
+  if (text) { sel = buildSelection(mode, text); if (!sel) return; }
   // Note: the send button is deliberately NOT globally disabled. A round may be
   // in flight in room A while the user switches to B and sends there; each send
   // captures its own roomId and the server serializes per-room. Disabling here
@@ -950,16 +1001,9 @@ async function send() {
         return;
       }
     }
-    // 2. the message turn (+ its model round)
-    let data;
-    if (mode === "research") {
-      setStatus(`research: ${panel.length} model${panel.length === 1 ? "" : "s"} working + ${judge} synthesizes…`, true);
-      data = await api(`/rooms/${roomId}/research`, "POST", { prompt: text, effort: $("#effort").value, panel, judge });
-    } else {
-      const addressed_to = $("#addressee").value || null;
-      setStatus(`converse: ${addressed_to ? "@" + addressed_to : "(last AI)"} responding…`, true);
-      data = await api(`/rooms/${roomId}/converse`, "POST", { prompt: text, addressed_to });
-    }
+    // 2. the message turn (+ its model round) — one unified dispatch endpoint
+    setStatus(modeStatus(sel), true);
+    const data = await api(`/rooms/${roomId}/run`, "POST", sel);
     input.value = "";
     // Concurrency: render the result ONLY if its room is still on screen. If the
     // user switched away while it ran, leave the active view alone and let the
@@ -978,9 +1022,10 @@ async function send() {
 }
 
 function syncModeUI() {
-  const research = currentMode() === "research";
-  $("#research-opts").classList.toggle("hidden", !research);
-  $("#converse-opts").classList.toggle("hidden", research);
+  const m = currentMode();
+  $("#converse-opts").classList.toggle("hidden", m !== "converse");
+  $("#research-opts").classList.toggle("hidden", m !== "fusion");
+  $("#sxs-opts").classList.toggle("hidden", m !== "side_by_side");
 }
 
 // ===== room settings (per-room roster + judge) ===============================
@@ -1156,7 +1201,7 @@ $("#input").addEventListener("keydown", (e) => {
   // an IME candidate-commit (also pressed via Enter) as a send.
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
-document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", syncModeUI));
+$("#mode").addEventListener("change", syncModeUI);
 $("#new-room-btn").addEventListener("click", newRoom);
 $("#room-settings-btn").addEventListener("click", openRoomSettings);
 $("#room-settings-close").addEventListener("click", () => $("#room-settings-overlay").classList.add("hidden"));

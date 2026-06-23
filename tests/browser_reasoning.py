@@ -66,7 +66,7 @@ def main():
             page.wait_for_function("document.querySelector('#title').textContent==='reasoning room'")
 
             # --- research round → collapsed reasoning disclosures ---
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             page.fill("#input", "why is the sky blue?")
             page.click("#send-btn")
             page.wait_for_selector(".round .synthesis", timeout=30000)

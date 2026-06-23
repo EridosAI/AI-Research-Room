@@ -47,7 +47,7 @@ def main():
         with sync_playwright() as p:
             b = p.chromium.launch(); page = b.new_page()
             page.goto(BASE + "/", wait_until="networkidle")
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
 
             # picker shows a checkbox per enabled provider (fixture has 5)
             boxes = page.locator("#panel-pick input[type=checkbox]")
@@ -68,7 +68,7 @@ def main():
             # ---- judge fallback: pick keyless deepseek as THIS round's judge ----
             page.select_option("#judge-pick", "deepseek")
             # run another round with only mock selected
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             boxes = page.locator("#panel-pick input[type=checkbox]")
             for i in range(boxes.count()):
                 cb = boxes.nth(i)

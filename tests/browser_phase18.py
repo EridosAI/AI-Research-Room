@@ -85,7 +85,7 @@ def main():
             print("badge OK: length→truncated, tool_calls→incomplete, stop/empty→none (no forced footer)")
 
             # --- a real, clean mock research round shows NO truncation badge ---
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             page.fill("#input", "a thorough question")
             page.click("#send-btn")
             page.wait_for_selector(".round .synthesis", timeout=30000)

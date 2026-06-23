@@ -68,7 +68,7 @@ def main():
             page.wait_for_function("document.querySelector('#title').textContent==='provenance room'")
 
             # --- research round → footer with thinking + model pill side by side ---
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
             page.fill("#input", "why is the sky blue?")
             page.click("#send-btn")
             page.wait_for_selector(".round .synthesis", timeout=30000)

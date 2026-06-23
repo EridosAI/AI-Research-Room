@@ -45,7 +45,7 @@ def main():
         with sync_playwright() as p:
             b = p.chromium.launch(); page = b.new_page()
             page.goto(BASE + "/", wait_until="networkidle")
-            page.locator('input[name="mode"][value="research"]').check()
+            page.select_option("#mode", "fusion")
 
             # judge dropdown defaults to the global research_judge (mock)
             assert page.locator("#judge-pick").input_value() == "mock", \

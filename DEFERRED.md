@@ -55,6 +55,27 @@ the blind payload). See [BUILD_amendment_phase22.md](BUILD_amendment_phase22.md)
   every room in the project. The new part is the project↔room hierarchy, not the file mechanism.
 - **Margin-intake bookmarklet** (drafted as phase 21) also remains deferred.
 
+## Interaction patterns on the round/mode rails (Phase 25 shipped the framework)
+
+Phase 25 made interaction patterns a category (rounds + a gate; one `run_mode`; selection decoupled
+from execution via the mode-selection object). Converse, Fusion, and Side-by-side are live. The rest
+are round-spec changes, not new code paths — see [BUILD_amendment_phase25.md](BUILD_amendment_phase25.md):
+
+- **Mapping (26).** Fusion's mode with the judge instruction swapped to *expose* (consensus / divergence
+  / unique / takeaway — don't merge). Trivial on these rails: a new judge `instruction` + `system`.
+- **Yes-and (26).** `[{A, transcript, ai}, {B, transcript+A, sequential, yes-and, ai}]` — fills the
+  `flow: sequential` extension point declared in `run_mode` (currently parallel-only; no untested
+  sequential code shipped).
+- **Blind/transcript panel toggle (26).** Expose the round `context` flag as a per-mode user choice (the
+  panel may *read* forward context but stays `ai-raw` — reads, never writes). The framework already
+  supports it; the migration proves both contexts (converse=transcript, fusion=blind).
+- **Debate (later).** Any mode with the gate flipped to loop-until-N/conclusion (the `gate` field is
+  `single` today; `loop` is the future value).
+- **Trajectory graph.** A second producer of the mode-selection object — drag the next round's shape on
+  the graph instead of via the dropdown. Same `/run` rails, no engine change.
+- **Mode-aware round label.** Side-by-side's judge turn currently renders in the "synthesis" slot; a
+  label that reads "divergence" for non-fusion judge rounds is deferred polish.
+
 ## Considered and rejected (recorded so it isn't re-litigated)
 
 - **Shared-retrieval / common-evidence pool for research rounds.** When web search landed
