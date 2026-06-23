@@ -15,6 +15,10 @@ difference. Current architecture is in [README.md](README.md); the build record 
 - **Multiple margins per room.** One margin per room for now (`margin.jsonl`). Multiple
   named side-channels would mean a margin id in the path + UI tabs. The engine already
   treats the margin as a separate file, so this is additive.
+- **Undo stack / redo from `rolledback.jsonl`.** Phase 27 ships SINGLE-level "undo last round" with a
+  recoverable log (removed turns appended to `rolledback.jsonl`), not a redo UI. A full undo/redo stack
+  (re-apply from the log) and selective mid-transcript edit/delete stay out — rollback is last-round
+  only, which matches the "my last round misfired" need without opening transcript surgery.
 - **Context compression / summarisation.** Forward context is the full filtered transcript
   (or, for the margin, a windowed slice). No summarisation of long histories yet. When
   rooms get long this is the natural next lever — summarise older turns into a running

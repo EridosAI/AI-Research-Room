@@ -68,6 +68,10 @@ def margin_path(room_id: str) -> Path:
     return _room_dir(room_id) / "margin.jsonl"
 
 
+def rolledback_path(room_id: str) -> Path:
+    return _room_dir(room_id) / "rolledback.jsonl"
+
+
 def _meta_path(room_id: str) -> Path:
     return _room_dir(room_id) / "room.json"
 
@@ -153,6 +157,36 @@ def update_room(room_id: str, **fields) -> dict:
         meta[k] = v
     _write_meta(room_id, meta)
     return meta
+
+
+def rollback_last_round(room_id: str) -> dict:
+    """Remove the last round — every turn from the last human turn to the end — from
+    main.jsonl. This is the ONE place we rewrite a transcript (otherwise append-only); it's
+    a deliberate admin op, so the removed turns are appended to rolledback.jsonl first
+    (undo/audit — nothing is lost). A round-head human turn carries the round_id, so for a
+    grouped round (fusion/mapping/side-by-side) this removes the prompt + panels + judge
+    together; for converse/yes-and it removes the prompt + its answer(s). Returns
+    {removed, remaining}."""
+    from . import transcript as T   # local import (no cycle: transcript imports nothing here)
+    path = main_path(room_id)
+    turns = T.load(path)
+    if not turns:
+        raise ValueError("nothing to roll back")
+    # the last human turn is the head of the last exchange
+    cut = next((i for i in range(len(turns) - 1, -1, -1)
+                if turns[i].get("role") == "human"), 0)
+    removed, kept = turns[cut:], turns[:cut]
+    rb = rolledback_path(room_id)
+    with rb.open("a", encoding="utf-8") as f:        # preserve removed turns (recoverable)
+        for t in removed:
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    with path.open("w", encoding="utf-8") as f:      # rewrite main without the last round
+        for t in kept:
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    meta = load_room(room_id)
+    if (meta.get("last_read_pos") or 0) > len(kept):
+        update_room(room_id, last_read_pos=len(kept))
+    return {"removed": len(removed), "remaining": len(kept)}
 
 
 def list_rooms() -> list[dict]:

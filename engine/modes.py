@@ -318,6 +318,16 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                   or (room["participants"] or providers.enabled() or providers.provider_keys())[0])
 
     human_meta = {"addressed_to": target} if mode.turn_mode == "converse" else {"round_id": round_id}
+    # Round provenance: stamp the mode + its selection params (incl. the panel_context
+    # toggle) on the round-head turn, so a transcript is self-describing about what move
+    # ran — what was missing when we couldn't tell whether "panel sees conversation" was
+    # on. meta only (never serialized forward by build_context), so the invariant holds.
+    sel_snapshot = {"mode": mode.name}
+    for k in ("panel", "seats", "target", "judge", "panel_context"):
+        v = selection.get(k)
+        if v:
+            sel_snapshot[k] = v
+    human_meta["selection"] = sel_snapshot
     transcript.append(transcript.make_turn(mode.turn_mode, "human", "human", prompt, human_meta), path)
 
     prior: list[tuple[str, str]] = []   # (speaker, text) from the latest ai round — judge sees TEXT only

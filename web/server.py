@@ -531,6 +531,24 @@ def room_run(room_id: str, body: RunBody) -> dict:
     return {"result": result, "mode": body.mode, "room_id": room_id, "transcript": view}
 
 
+# ---- roll back the last round (Phase 27) ------------------------------------
+@app.post("/rooms/{room_id}/rollback")
+def rollback_room(room_id: str) -> dict:
+    """Remove the last round from a room (the only transcript rewrite — otherwise
+    append-only). Takes the MAIN room lock so it serializes with rounds; the removed
+    turns are preserved in rolledback.jsonl (recoverable)."""
+    _require_room(room_id)
+    with _room_lock(room_id):
+        try:
+            res = rooms.rollback_last_round(room_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        view = _full_room(room_id)
+    _maybe_export(room_id)   # keep any Obsidian export in step with the truncation
+    return {"removed": res["removed"], "remaining": res["remaining"],
+            "room_id": room_id, "transcript": view}
+
+
 # ---- attached files (Phase 22) ----------------------------------------------
 @app.post("/rooms/{room_id}/files")
 def post_files(room_id: str, body: FilesBody) -> dict:

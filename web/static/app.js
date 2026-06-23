@@ -378,7 +378,12 @@ function renderRound(b) {
   const div = document.createElement("div"); div.className = "round";
   if (b.prompt) {
     const pr = document.createElement("div"); pr.className = "prompt";
-    pr.appendChild(whoLine(displayName(), colorOf("human"), "research"));
+    // round provenance (Phase 27): the mode that ran + whether the panel saw the
+    // conversation — read from the round-head turn's stamped selection.
+    const sel = (b.prompt.meta && b.prompt.meta.selection) || {};
+    let lbl = (sel.mode || "research").replace(/_/g, "-");
+    if (sel.panel_context === "transcript") lbl += " · panel saw chat";
+    pr.appendChild(whoLine(displayName(), colorOf("human"), lbl));
     const body = document.createElement("div"); body.className = "body"; renderMd(body, b.prompt.text);
     pr.appendChild(body); div.appendChild(pr);
   }
@@ -428,6 +433,7 @@ function render() {
   $("#title").textContent = STATE.room ? STATE.room.title : "";
   $("#room-settings-btn").disabled = !STATE.room;
   $("#margin-toggle").disabled = !STATE.room;
+  $("#rollback-btn").disabled = !STATE.room || !STATE.turns.length;
   renderModelBar();
   const main = $("#stream"); main.innerHTML = "";
   if (!STATE.room) {
@@ -1235,6 +1241,28 @@ $("#input").addEventListener("keydown", (e) => {
 $("#mode").addEventListener("change", syncModeUI);
 $("#new-room-btn").addEventListener("click", newRoom);
 $("#room-settings-btn").addEventListener("click", openRoomSettings);
+
+// how many trailing turns the last round spans (last human turn → end) — for the confirm.
+function lastRoundSize() {
+  const ts = STATE.turns;
+  for (let i = ts.length - 1; i >= 0; i--) if (ts[i].role === "human") return ts.length - i;
+  return ts.length;
+}
+$("#rollback-btn").addEventListener("click", async () => {
+  if (!STATE.room || !STATE.turns.length) return;
+  const n = lastRoundSize();
+  if (!confirm(`Roll back the last round? Removes the last ${n} turn${n === 1 ? "" : "s"} from “${STATE.room.title}” (kept in rolledback.jsonl — recoverable).`)) return;
+  const roomId = STATE.room.id;
+  try {
+    const data = await api(`/rooms/${roomId}/rollback`, "POST");
+    if (STATE.room && STATE.room.id === data.room_id) {
+      adoptRoom(data.transcript);
+      await markRead(roomId, data.transcript.turn_count);
+    }
+    await refreshRooms();
+    banner(`Rolled back ${data.removed} turn${data.removed === 1 ? "" : "s"}.`);
+  } catch (e) { banner(e.message); }
+});
 $("#room-settings-close").addEventListener("click", () => $("#room-settings-overlay").classList.add("hidden"));
 $("#room-settings-save").addEventListener("click", saveRoomSettings);
 

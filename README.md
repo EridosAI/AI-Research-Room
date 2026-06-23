@@ -57,7 +57,14 @@ Two layers, cleanly split:
   sees conversation" — panelists may read room history but stay independent of each other), and each
   judge turn shows a **mode-aware label** (Synthesis / Map / Divergence). The invariant holds by
   construction: a round's `instruction` is a prompt-modifier (never serialized forward), and `ai-raw`
-  panel answers stay out of forward context regardless of the context toggle.
+  panel answers stay out of forward context regardless of the context toggle. Each round records
+  its **provenance** (the mode + params, incl. the panel-context toggle) on the round-head turn and
+  shows it on the prompt line (e.g. `side-by-side · panel saw chat`), so a transcript is
+  self-describing about what move ran.
+- **Undo last round.** The transcript is append-only, with one deliberate exception: a **"↶ undo
+  round"** control removes the most recent round (its prompt + answers + judge turn) from a room. The
+  removed turns are written to `rolledback.jsonl` first, so it's recoverable — a clean way to drop a
+  misfired round instead of hand-editing the JSONL.
 - **Blind panel + judge.** Panelists never see each other's work; only the judge's
   synthesis flows forward into later turns. Raw panel answers are kept for the record and
   the UI's "view full", but are filtered out of model context — the **synthesis-only
@@ -373,6 +380,9 @@ python tests/engine_phase25.py         # round/mode framework + side-by-side: ai
 python tests/browser_phase25.py        # unified mode selector + contextual params + side-by-side via /run
 python tests/engine_phase26.py         # mapping + yes-and + panel context toggle (ai-raw kept) + judge_kind
 python tests/browser_phase26.py        # mapping/yes-and in the selector, contextual params, mode-aware labels
+python tests/engine_phase27.py         # round provenance stamped (not leaked) + rollback whole-round + backup
+python tests/browser_phase27.py        # round provenance label + undo-last-round button
+python tests/rollback_race.py          # rollback can't truncate a round mid-append (room lock serializes)
 ```
 
 ## Environment
