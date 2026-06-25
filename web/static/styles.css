@@ -232,7 +232,7 @@ input, textarea { color: var(--text-primary); }
 .turn-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
 /* model provenance pill — non-interactive; served model on hover (title attr) */
-.model-pill { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary); cursor: default;
+.model-pill { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary); cursor: pointer;
   background: transparent; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); }
 .model-pill.mismatch { color: var(--warning); border-color: var(--warning); }
 
@@ -392,6 +392,13 @@ input, textarea { color: var(--text-primary); }
 .win-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
   background: var(--error); margin-left: 6px; vertical-align: middle; cursor: help; }
 
+/* dropped/absent panelists in a round — muted warning; the reason is on hover */
+.absent-note { margin: 6px 0 2px; font-size: var(--text-xs); color: var(--text-tertiary); }
+.absent-seat { color: var(--warning); cursor: help; border-bottom: 1px dotted var(--warning); }
+
+/* sidebar spinner for a room with a round in flight (replaces the unread dot while running) */
+.room-spin { flex: 0 0 auto; width: 9px; height: 9px; border-width: 2px; }
+
 /* copy button on output turns — quiet, like the other footer affordances */
 .copy-btn { font-size: 11.5px; padding: 2px 8px; color: var(--text-tertiary);
   background: transparent; border: 1px solid var(--border-default); border-radius: var(--radius-md); }
@@ -417,6 +424,13 @@ input, textarea { color: var(--text-primary); }
 .mp-seg { display: flex; gap: 4px; }
 .mp-seg button { flex: 1; padding: 3px 0; font-size: 11px; }
 .mp-seg button.sel { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--text-primary); }
+/* inert dial: reasoning toggle is off, so the effort never sends — greyed + a note */
+.mp-effort.off { opacity: 0.5; }
+.mp-effort.off .mp-seg button { cursor: not-allowed; }
+.mp-note { margin-top: 6px; font-size: 10.5px; color: var(--warning); }
+/* "view thinking" button in the turn popover */
+.tp-view { display: inline-flex; align-items: center; gap: 4px; width: 100%; justify-content: center;
+  margin-bottom: 10px; padding: 4px 0; font-size: 11.5px; }
 
 /* stat block: thin divider, then one-line label↔value rows */
 .mp-stats { border-top: 1px solid var(--border-subtle); padding-top: 8px; }

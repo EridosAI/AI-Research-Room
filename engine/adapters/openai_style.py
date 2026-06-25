@@ -67,8 +67,37 @@ def _openrouter_search(data: dict) -> dict | None:
     return {"searches": [{"sources": cites}], "citations": cites}
 
 
+# The transcript-context payload (build_context) ends every user message with
+# "Respond as [speaker].". Split there: the head (system + whole transcript) is the
+# STABLE prefix to cache; the short tail is volatile. Next turn the head grows by
+# appending, so the prior head is a byte-prefix → a cache hit on it.
+_CACHE_MARK = "\n\nRespond as ["
+
+
+def _cache_messages(msgs: list[dict], ttl: str | None) -> list[dict]:
+    """Mark the stable transcript prefix of the last user message with a cache breakpoint
+    (OpenRouter/Anthropic `cache_control`). Splits at _CACHE_MARK so the big transcript head
+    is cached and the trailing 'Respond as […]' stays volatile. No marker → unchanged."""
+    out = []
+    cc = {"type": "ephemeral"}
+    if ttl:
+        cc["ttl"] = ttl
+    for m in msgs:
+        c = m.get("content")
+        if m.get("role") == "user" and isinstance(c, str) and _CACHE_MARK in c:
+            i = c.rfind(_CACHE_MARK)
+            head, tail = c[:i + 2], c[i + 2:]          # keep the "\n\n" with the cached head
+            out.append({"role": "user", "content": [
+                {"type": "text", "text": head, "cache_control": cc},
+                {"type": "text", "text": tail}]})
+        else:
+            out.append(m)
+    return out
+
+
 def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None,
-         reasoning: bool = False, web_search: bool = False, reasoning_effort: str | None = None
+         reasoning: bool = False, web_search: bool = False, reasoning_effort: str | None = None,
+         cache: bool = False
          ) -> tuple[str, str | None, dict | None, str | None, dict | None, str | None]:
     """Returns (answer_text, reasoning_or_None, usage_or_None, served_model_or_None,
     search_or_None, finish_reason_or_None). When `reasoning` is on: OpenRouter rows get the
@@ -103,12 +132,29 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
         # ask OR to include the authoritative per-request USD cost in usage.cost
         # (reflects the actual provider route; no price table needed our side).
         body["usage"] = {"include": True}
+    # Prompt caching: mark the stable transcript prefix so OR/Anthropic serve it from cache.
+    # OR-only (cache_control is the Anthropic shape; OR ignores it for non-supporting models).
+    use_cache = cache and _is_openrouter(provider)
+    if use_cache:
+        body["messages"] = _cache_messages(body["messages"], settings.PROMPT_CACHE_TTL)
+    hdr = {"Authorization": f"Bearer {key}"}
     try:
-        r = httpx.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=TIMEOUT)
+        r = httpx.post(url, headers=hdr, json=body, timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(redact(f"HTTP {e.response.status_code}: {e.response.text[:400]}", key)) from None
+        # caching must NEVER break a turn: if the cached shape is rejected, retry once
+        # plain (without cache_control). Any other 4xx/5xx propagates as before.
+        if use_cache and e.response.status_code == 400:
+            body["messages"] = _messages(payload)
+            try:
+                r = httpx.post(url, headers=hdr, json=body, timeout=TIMEOUT)
+                r.raise_for_status()
+                data = r.json()
+            except httpx.HTTPError as e2:
+                raise RuntimeError(redact(f"request failed: {e2}", key)) from None
+        else:
+            raise RuntimeError(redact(f"HTTP {e.response.status_code}: {e.response.text[:400]}", key)) from None
     except httpx.HTTPError as e:
         raise RuntimeError(redact(f"request failed: {e}", key)) from None
     choice = (data.get("choices") or [{}])[0]
@@ -122,6 +168,16 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
         usage = {"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
         if u.get("cost") is not None:                  # OpenRouter's authoritative USD cost
             usage["cost"] = u["cost"]
+        # how much the model ACTUALLY thought — the real signal vs the requested effort
+        # (counted within completion_tokens). 0/absent ⇒ it didn't reason this turn.
+        ctd = u.get("completion_tokens_details") or {}
+        if ctd.get("reasoning_tokens") is not None:
+            usage["reasoning"] = ctd["reasoning_tokens"]
+        # prompt-cache hit: how many input tokens were served from cache (~10% cost) —
+        # the visible proof the stable transcript prefix didn't re-prefill.
+        ptd = u.get("prompt_tokens_details") or {}
+        if ptd.get("cached_tokens") is not None:
+            usage["cached"] = ptd["cached_tokens"]
     search = (_openrouter_search(data) if web_search and _is_openrouter(provider) else None)
     return text, rc, usage, (data.get("model") or None), search, finish
 

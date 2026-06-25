@@ -58,6 +58,16 @@ RESEARCH_MAX_TOKENS = int(os.environ.get("RESEARCH_ROOM_RESEARCH_MAX_TOKENS", "3
 
 ANTHROPIC_VERSION = "2023-06-01"
 
+# Prompt caching (Phase 29). On a transcript-context call (converse / yes-and /
+# transcript-panel) the whole conversation is re-sent each turn; caching marks the stable
+# transcript prefix so OpenRouter/Anthropic serve it from cache (~10% cost, big latency
+# win) instead of re-prefilling. TTL defaults to "1h" — the 5-minute default expires
+# between long deep-research turns, so the prefix would never hit. Set "" to use the
+# provider default (5m), or "5m"/"1h". A cached request that errors transparently retries
+# without caching, so this can never break a turn.
+PROMPT_CACHE = os.environ.get("RESEARCH_ROOM_PROMPT_CACHE", "1") not in ("0", "false", "False", "")
+PROMPT_CACHE_TTL = os.environ.get("RESEARCH_ROOM_PROMPT_CACHE_TTL", "1h")
+
 
 def secrets_outside_vault() -> bool:
     """True iff the secrets file is not inside the vault tree (a hard invariant)."""

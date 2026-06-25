@@ -89,7 +89,8 @@ def main() -> int:
     check("summary + text joined", reasoning == "SUM\n\nTXT")
     check("encrypted blob skipped", "ENCRYPTED_BLOB" not in (reasoning or ""))
     check("served_model parsed (OR slug)", served == "anthropic/claude-opus-4.8")
-    check("usage parsed (output counts reasoning tokens)", usage == {"input": 5, "output": 3})
+    check("usage parsed (input/output + reasoning tokens captured)",
+          usage == {"input": 5, "output": 3, "reasoning": 99})
     check("finish_reason parsed", finish == "stop")
 
     # --- 3. fallback: flat `reasoning` string when no details ---
@@ -129,10 +130,10 @@ def main() -> int:
     seen = []
     real = providers.call_model
 
-    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None):
+    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None, **kw):
         seen.append((provider_key, tools, reasoning_effort))
         return real(provider_key, payload, tools=tools, effort=effort,
-                    max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+                    max_tokens=max_tokens, reasoning_effort=reasoning_effort, **kw)
 
     providers.call_model = _spy
     try:

@@ -48,10 +48,10 @@ def _spy_runner():
     seen = []
     real = providers.call_model
 
-    def spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None):
+    def spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None, **kw):
         seen.append((provider_key, payload))
         return real(provider_key, payload, tools=tools, effort=effort,
-                    max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+                    max_tokens=max_tokens, reasoning_effort=reasoning_effort, **kw)
     return seen, real, spy
 
 

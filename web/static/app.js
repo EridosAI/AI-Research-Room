@@ -212,11 +212,57 @@ function renderConverse(t) {
 
 function plainPreview(text, n = 160) { return (text || "").replace(/\s+/g, " ").trim().slice(0, n); }
 
-// A non-interactive provenance pill showing the API-reported served_model — glanceable
-// (the served id as text, provider/ prefix stripped), not hidden behind a hover. The
-// served string is the TRUTH vs the configured header label, so when they disagree the
-// pill tints (warning) and spells out both. textContent only — never innerHTML.
-function modelPill(t) {
+// The thinking level actually REQUESTED for a turn (stamped in meta.reasoning_effort):
+// 'off' (reasoning toggle was off → the effort dial was inert), 'default', or the effort.
+function thinkingLabel(e) {
+  if (!e) return "—";
+  if (e === "off") return "off (reasoning disabled)";
+  if (e === "default") return "default";
+  return e;
+}
+
+// Per-turn metadata popover, anchored to the model pill (singleton, mirrors the
+// model-square popover). Keeps the footer clean: served model · thinking level ·
+// reasoning tokens (the ACTUAL think, vs the requested level) · tokens · cost · finish,
+// plus a "view thinking" button when a trace exists (toggles the footer disclosure).
+let _turnPopTimer = null;
+function hideTurnPopover() { clearTimeout(_turnPopTimer); const p = $("#turn-popover"); if (p) p.classList.add("hidden"); }
+function scheduleHideTurnPop() { clearTimeout(_turnPopTimer); _turnPopTimer = setTimeout(hideTurnPopover, 180); }
+function showTurnPopover(t, toggleBtn, rect) {
+  clearTimeout(_turnPopTimer);
+  const pop = $("#turn-popover"); if (!pop) return;
+  pop.innerHTML = "";
+  const meta = t.meta || {}; const u = meta.usage || {};
+  const head = el("div", "mp-headrow"); const box = el("div", "mp-headbox");
+  const nm = el("div", "mp-head"); nm.textContent = meta.served_model || meta.model || "model"; box.append(nm);
+  if (meta.model && meta.served_model && meta.model !== meta.served_model) {
+    const s = el("div", "mp-sub"); s.textContent = "configured: " + meta.model; box.append(s);
+  }
+  head.append(box); pop.append(head);
+  if (toggleBtn) {
+    const vb = el("button", "tp-view"); vb.append(boltIcon(), document.createTextNode(" view thinking"));
+    vb.addEventListener("click", () => { hideTurnPopover(); toggleBtn.click(); toggleBtn.scrollIntoView({ block: "nearest" }); });
+    pop.append(vb);
+  }
+  const stats = el("div", "mp-stats");
+  const rows = [["Thinking", thinkingLabel(meta.reasoning_effort)],
+                ["Reasoning", (u.reasoning != null ? fmtTokens(u.reasoning) + " tok" : (meta.reasoning_effort === "off" ? "none" : "—"))],
+                ["Tokens", (u.input != null ? `${u.exact ? "" : "~"}${fmtTokens(u.input)} in / ${fmtTokens(u.output || 0)} out` : "—")]];
+  if (u.cached) rows.push(["Cached", `${fmtTokens(u.cached)} in (~90% off)`]);   // prompt-cache hit
+  if (typeof u.cost === "number") rows.push(["Cost", fmtCost(u.cost)]);
+  if (meta.finish_reason) rows.push(["Finish", meta.finish_reason]);
+  for (const [l, v] of rows) stats.append(mpRow(l, v));
+  pop.append(stats);
+  pop.classList.remove("hidden");
+  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - pop.offsetWidth - 12)) + "px";
+  pop.style.top = Math.max(8, rect.top - pop.offsetHeight - 8) + "px";   // above the pill
+  pop.onmouseenter = () => clearTimeout(_turnPopTimer);
+  pop.onmouseleave = scheduleHideTurnPop;
+}
+
+// The provenance pill: served model as text (prefix-stripped); hover opens the metadata
+// popover above. Tints + names both when served ≠ configured. textContent only.
+function modelPill(t, toggleBtn) {
   const served = t.meta && t.meta.served_model;
   if (!served) return null;
   const pill = el("span", "model-pill");
@@ -227,6 +273,9 @@ function modelPill(t) {
     pill.classList.add("mismatch");
     pill.title += "  (configured: " + configured + ")";
   }
+  pill.addEventListener("mouseenter", () => showTurnPopover(t, toggleBtn, pill.getBoundingClientRect()));
+  pill.addEventListener("mouseleave", scheduleHideTurnPop);
+  pill.addEventListener("click", () => showTurnPopover(t, toggleBtn, pill.getBoundingClientRect()));   // touch
   return pill;
 }
 
@@ -297,6 +346,7 @@ function turnFooterParts(t) {
   if (!hasReasoning && !served && !sources.length && !trunc && !isOutput) return null;
   const footer = el("div", "turn-footer");
   const bodies = [];
+  let thinkToggle = null;                                // the trace toggle, surfaced in the pill popover
   if (trunc) footer.append(trunc);                       // truncation flag leads (most important)
   if (hasReasoning) {
     const summarized = meta.reasoning_kind === "summarized";
@@ -308,9 +358,9 @@ function turnFooterParts(t) {
       body.classList.toggle("hidden", !show);
       btn.textContent = (show ? "▾ " : "▸ ") + (summarized ? "thinking (summary)" : "thinking");
     });
-    footer.append(btn); bodies.push(body);               // thinking first…
+    footer.append(btn); bodies.push(body); thinkToggle = btn;   // thinking first…
   }
-  if (served) footer.append(modelPill(t));               // …then model…
+  if (served) footer.append(modelPill(t, thinkToggle));  // …then model (hover → metadata popover)…
   if (sources.length) {                                  // …then sources
     const btn = el("button", "sources-toggle");
     const label = (n) => `sources (${n})`;
@@ -412,6 +462,22 @@ function renderRound(b) {
       grid.appendChild(card);
     }
     div.appendChild(grid);
+  }
+  // dropped panelists (failed → absent, NEVER counted as agreement). The reason rides the
+  // judge turn's meta.absent (Phase 30) — surfaced here + on hover, so "why did X drop?"
+  // is answerable in the UI instead of lost to the judge prompt.
+  const absent = (b.judge && b.judge.meta && b.judge.meta.absent) || [];
+  if (absent.length) {
+    const box = el("div", "absent-note");
+    box.append(document.createTextNode("⚠ dropped (not counted): "));
+    absent.forEach((a, i) => {
+      const s = el("span", "absent-seat");
+      s.textContent = a.speaker;
+      s.title = a.error || "failed";          // the reason, on hover
+      box.append(s);
+      if (i < absent.length - 1) box.append(document.createTextNode(", "));
+    });
+    div.appendChild(box);
   }
   if (b.judge) {
     const syn = document.createElement("div"); syn.className = "synthesis";
@@ -641,19 +707,26 @@ function popoverHeader(k) {
 // effort selector — data-driven from the provider's effort_options (ASCENDING);
 // returns null (omitted) when the model exposes none (proxy-Grok / direct rows).
 function effortSection(k) {
-  const opts = (providerOf(k) || {}).effort_options;
+  const p = providerOf(k) || {};
+  const opts = p.effort_options;
   if (!opts || !opts.length) return null;
+  // The dial is INERT when the model's reasoning toggle is off — the effort is never sent
+  // (RR Loom 4 bug). Show it greyed + a note so it can't silently mislead.
+  const off = !p.reasoning;
   const cur = (STATE.room && STATE.room.reasoning_effort && STATE.room.reasoning_effort[k]) || opts[opts.length - 1];
-  const c = el("div", "mp-effort");
+  const c = el("div", "mp-effort" + (off ? " off" : ""));
   const l = el("div", "mp-label"); l.append(boltIcon(), document.createTextNode(" reasoning effort")); c.append(l);
   const seg = el("div", "mp-seg");
   for (const o of opts) {                              // already ascending: left = less
     const b = el("button", o === cur ? "sel" : "");
     b.textContent = o;
-    b.addEventListener("click", () => setRoomEffort(k, o));
+    if (off) b.disabled = true;
+    else b.addEventListener("click", () => setRoomEffort(k, o));
     seg.append(b);
   }
-  c.append(seg); return c;
+  c.append(seg);
+  if (off) { const n = el("div", "mp-note"); n.textContent = 'reasoning off — enable “show reasoning” in Settings → Providers'; c.append(n); }
+  return c;
 }
 
 async function setRoomEffort(k, effort) {
@@ -795,7 +868,8 @@ function renderSidebar() {
   }
   for (const r of STATE.rooms) {
     const row = el("div", "room-row" + (STATE.room && r.id === STATE.room.id ? " active" : ""));
-    if (r.unread && !(STATE.room && r.id === STATE.room.id)) row.append(el("span", "unread-dot"));
+    if (r.running) row.append(el("span", "spinner room-spin"));               // a round is in flight here
+    else if (r.unread && !(STATE.room && r.id === STATE.room.id)) row.append(el("span", "unread-dot"));
     const t = el("span", "rtitle"); t.textContent = r.title || r.id; row.append(t);
     if (r.turn_count) { const m = el("span", "rmeta"); m.textContent = r.turn_count; row.append(m); }
     row.addEventListener("click", () => switchRoom(r.id));
@@ -863,6 +937,40 @@ function adoptRoom(view) {
   render();
   renderMargin();                       // show THIS room's own margin
   if (STATE.marginOpen) applyMarginWidth();
+  watchActiveRoom(!!view.running);      // round-in-progress signal (Phase 30)
+}
+
+// In-room "round in progress" signal. The per-send status is cleared on room switch, so a
+// backgrounded or resumed round looked idle. This reconstructs it from server state
+// (room.running): show a spinner + poll the room every few seconds so the panels + synthesis
+// appear live, then clear when it finishes.
+let _roomPollTimer = null, _watching = null;
+function stopRoomPoll() { if (_roomPollTimer) { clearTimeout(_roomPollTimer); _roomPollTimer = null; } }
+function watchActiveRoom(running) {
+  stopRoomPoll();
+  if (STATE.room && running) {
+    _watching = STATE.room.id;
+    setStatus("a round is running in this room…", true);
+    _roomPollTimer = setTimeout(pollActiveRoom, 3000);
+  } else {
+    if (_watching && (!STATE.room || _watching === STATE.room.id)) setStatus("");   // a watched round just ended
+    _watching = null;
+  }
+}
+async function pollActiveRoom() {
+  _roomPollTimer = null;
+  if (!STATE.room) { _watching = null; return; }
+  const id = STATE.room.id;
+  let view;
+  try { view = await api(`/rooms/${id}`); }
+  catch (e) { watchActiveRoom(true); return; }          // transient error → keep watching
+  if (!STATE.room || STATE.room.id !== id) return;       // moved on; switchRoom manages the new room
+  if ((view.turn_count || 0) !== (STATE.turns || []).length) {
+    adoptRoom(view);                                     // new turns landed → re-render + re-watch
+    refreshRooms();
+  } else {
+    watchActiveRoom(!!view.running);                     // still running → keep polling; done → clear
+  }
 }
 
 async function markRead(id, count) {

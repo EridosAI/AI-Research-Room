@@ -20,15 +20,32 @@ difference. Current architecture is in [README.md](README.md); the build record 
   (re-apply from the log) and selective mid-transcript edit/delete stay out — rollback is last-round
   only, which matches the "my last round misfired" need without opening transcript surgery.
 - **Context compression / summarisation.** Forward context is the full filtered transcript
-  (or, for the margin, a windowed slice). No summarisation of long histories yet. When
-  rooms get long this is the natural next lever — summarise older turns into a running
-  digest that flows forward in place of the raw turns.
+  (or, for the margin, a windowed slice). No summarisation of long histories yet. This is the
+  **lossy, complementary** lever to Phase 29's prompt caching: caching makes re-sending the full
+  context cheap/fast (lossless) but doesn't shrink it, so when a thread approaches a model's *window*
+  (watch the context ring), summarise older turns into a running digest that flows forward in place of
+  the raw turns. Per-model compaction (Wave 5) swaps one seat's slice when its ring fills.
+- **Verify OpenRouter's 1h cache-TTL passthrough** (Phase 29). Caching defaults to a 1h TTL
+  (`cache_control.ttl`), which is an Anthropic extended-cache beta; whether OR forwards it (vs falling
+  back to 5m) wants a live check against a real response. The transparent 400-retry already covers
+  outright rejection — this is just to confirm long-gap turns actually hit the cache.
+- **Global cross-room running poll** (Phase 30). The live in-room "round running" indicator + transcript
+  poll follow the ACTIVE room; other rooms' sidebar spinners refresh on the next `/rooms` fetch, not
+  continuously. A lightweight global poll (or server push) would keep every room's running state live
+  while you sit in a different one. Also: a structured "why absent" surface (auth-expired vs timeout vs
+  context-length) layered on the stored error string — right now it's the raw, key-redacted message on
+  hover.
 - **Mode 3 — hand-up / interject.** Only `converse` and `research` exist. A third mode
   where a model can raise a hand mid-round, or the user injects a steer into an in-flight
   round, was scoped out as its own design.
 - **Auth / multi-user.** Single-user, localhost-only by construction (binds `127.0.0.1`,
   config endpoints reject non-loopback). No accounts, sessions, or per-user data. Any
   multi-user story is a separate project, not a flag flip.
+- **Surface cli-runner reasoning** (Phase 28). The per-turn metadata popover shows the requested
+  thinking level + actual reasoning tokens for api rows. A cli seat (Grok via its runner) DOES reason,
+  but exposes no api reasoning param/usage to us, so those turns are marked `off` and show no reasoning
+  tokens. If a cli runner ever surfaces its trace/token count, capture it through the same `meta.usage`
+  / `meta.reasoning` channel and the popover lights up unchanged.
 - **Auto-suggested room tags** (Phase 12). The Obsidian export writes per-room `tags` into the
   `.md` frontmatter, but you set them by hand in room settings. Auto-suggesting tags from the
   transcript via a cheap model is a nice-to-have left out for now.

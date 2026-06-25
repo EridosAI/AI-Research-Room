@@ -95,7 +95,8 @@ def main() -> int:
     openai_style.httpx = _httpx
     check("content parsed", text == "PONG\ngrok-1")
     check("reasoning_content captured", reasoning == "The task is to reply PONG then state the model id.")
-    check("usage mapped (input/output)", usage == {"input": 149, "output": 7})
+    check("usage mapped (input/output + reasoning tokens)",
+          usage == {"input": 149, "output": 7, "reasoning": 670})
     check("served_model is the HONEST grok-4.3 (prose said grok-1)", served == "grok-4.3")
     check("finish_reason captured", finish == "stop")
     check("localhost proxy is NOT treated as OpenRouter (no search tool)",

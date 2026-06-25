@@ -77,7 +77,13 @@ Two layers, cleanly split:
   out to an agentic CLI runner, e.g. Grok on a SuperGrok subscription — **no key**).
 - **Graceful degradation.** A failed panelist is dropped and marked *absent* (never treated
   as agreement); a round aborts only if everyone fails. If the **judge** is unavailable it
-  falls back to a panelist that answered, so a bad judge can't sink a good round.
+  falls back to a panelist that answered, so a bad judge can't sink a good round. A dropped
+  panelist is shown in the round (**"dropped (not counted): <seat>"**, with the error on hover),
+  so you can see *which* model failed and *why* instead of it silently missing.
+- **Round-in-progress signal.** A round in flight shows a spinner — in the room you're in
+  (reconstructed from server state, so a backgrounded or long round still reads as working when you
+  come back, not idle) and as a spinner on the room in the sidebar. The active room polls while a round
+  runs, so panels + the synthesis appear live, then the indicator clears when it finishes.
 - **Visible reasoning (opt-in, best-effort).** Flip "show reasoning" on a provider and its
   answers carry the model's reasoning, shown as a collapsed "thinking" disclosure in the turn's
   footer. Captured from OpenRouter's `reasoning_details` (summary + text; encrypted entries
@@ -115,12 +121,17 @@ Two layers, cleanly split:
   in its system prompt — answer from training knowledge, but flag current/real-time facts it can't
   verify instead of presenting them as freshly searched. Capability-driven (tied to the web-search
   flag), so it auto-covers any search-less seat and never fires when search is on.
-- **Served-model provenance.** Beside "thinking" sits a non-interactive **model** pill carrying
+- **Served-model provenance + per-turn metadata.** Beside "thinking" sits a **model** pill carrying
   `meta.served_model` — what the API *reported* serving the turn (`response.model`), distinct from
   the *configured* model in the header. They're usually equal; when they differ the mismatch is
   recorded and the pill tints (the model's prose can lie about its identity, `response.model`
-  can't). It rides `meta` like reasoning, so it's excluded from forward context too; the Grok-CLI
-  path reports none, so the pill just doesn't show.
+  can't). Hovering the pill opens a **metadata popover**: the **thinking level requested** (`off` when
+  a model's reasoning toggle is off — so the effort dial was inert; else the effort / `default`), the
+  **reasoning tokens actually spent** (the real "how hard did it think", vs the requested level),
+  tokens, cost, finish reason, and a **"view thinking"** button when a trace exists. Everything rides
+  `meta`, so it's excluded from forward context; the Grok-CLI path reports no served model, so the pill
+  just doesn't show. The effort dial itself is **greyed with a note when reasoning is off**, so it can't
+  silently mislead.
 - **Web search (opt-in, per provider).** Flip "web search" on a provider and its **research**
   panelists search the web server-side while answering — Claude's native `web_search` tool, or
   OpenRouter's `web_search` server tool for anything routed through OpenRouter (Grok already
@@ -145,6 +156,14 @@ Two layers, cleanly split:
   answers in a collapsed callout, margin excluded) with YAML frontmatter (room, date,
   participants, your per-room tags) for backlinks. JSONL stays canonical; the `.md` is a
   one-way, full-rewrite export the app never reads back.
+- **Prompt caching.** Converse re-sends the whole transcript every turn (the API is stateless — the
+  model keeps nothing between calls), so a long thread would re-pay full prefill each time. Caching marks
+  the stable transcript prefix with a `cache_control` breakpoint so OpenRouter/Anthropic serve it from
+  cache (~10% of input cost + a big latency win) instead of re-prefilling — the lossless version of "it
+  only needs the new turns". TTL defaults to **1h** (the 5-minute default expires between long
+  deep-research turns); a cached request that's rejected transparently retries without caching, so it can
+  never break a turn. The pill popover shows a **Cached** row when a hit lands. Off via
+  `RESEARCH_ROOM_PROMPT_CACHE=0`.
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.
@@ -383,6 +402,12 @@ python tests/browser_phase26.py        # mapping/yes-and in the selector, contex
 python tests/engine_phase27.py         # round provenance stamped (not leaked) + rollback whole-round + backup
 python tests/browser_phase27.py        # round provenance label + undo-last-round button
 python tests/rollback_race.py          # rollback can't truncate a round mid-append (room lock serializes)
+python tests/engine_phase28.py         # reasoning-token capture + requested-thinking-level stamp (off/default/effort)
+python tests/browser_phase28.py        # model-pill metadata popover + inert effort-dial guard
+python tests/engine_phase29.py         # prompt caching: prefix split + cache_control/ttl + 400 fallback + capture
+python tests/browser_phase29.py        # cached-token row in the turn popover
+python tests/engine_phase30.py         # absent-panelist reasons stamped on the judge turn (not leaked)
+python tests/browser_phase30.py        # round-in-progress signal (in-room + sidebar) + absent rendering
 ```
 
 ## Environment

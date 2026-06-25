@@ -475,7 +475,7 @@ def _guard_no_search(payload: dict, searches: bool) -> dict:
 
 def call_model(provider_key: str, payload: dict, tools: bool = False,
                effort: str = "medium", max_tokens: int | None = None,
-               reasoning_effort: str | None = None) -> ModelReply:
+               reasoning_effort: str | None = None, cache: bool = False) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -516,7 +516,7 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     else:
         text, reasoning, raw, served, search, finish = openai_style.chat(
             p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort)
+            reasoning_effort=reasoning_effort, cache=cache)
         kind = "full" if reasoning else None
     usage = ({**raw, "exact": True} if raw else _estimate_usage(payload, text))
     return ModelReply(text, reasoning, kind, usage, served_model=served,

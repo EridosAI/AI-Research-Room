@@ -134,10 +134,10 @@ def main() -> int:
     seen = []
     real = providers.call_model
 
-    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None):
+    def _spy(provider_key, payload, tools=False, effort="medium", max_tokens=None, reasoning_effort=None, **kw):
         seen.append((provider_key, tools, reasoning_effort))
         return real(provider_key, payload, tools=tools, effort=effort,
-                    max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+                    max_tokens=max_tokens, reasoning_effort=reasoning_effort, **kw)
 
     providers.call_model = _spy
     try:

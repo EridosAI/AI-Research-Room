@@ -188,18 +188,33 @@ def _attached_docs(turns: list[dict]) -> list[str]:
 
 # ---- shared primitives (extracted, not rewritten) --------------------------
 def _panelist(speaker: str, payload: dict, effort: str, reasoning_effort: str | None = None,
-              *, tools: bool = True, max_tokens: int | None = None):
+              *, tools: bool = True, max_tokens: int | None = None, cache: bool = False):
     """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
     a failure becomes an absence, captured for the judge prompt."""
     try:
         reply = providers.call_model(speaker, payload, tools=tools, effort=effort,
                                      max_tokens=(max_tokens or settings.RESEARCH_MAX_TOKENS),
-                                     reasoning_effort=reasoning_effort)
+                                     reasoning_effort=reasoning_effort, cache=cache)
         if not reply.text.strip():
             return speaker, None, "empty answer"
         return speaker, reply, None
     except Exception as e:  # noqa: BLE001 — any failure → absent, never agreement
         return speaker, None, str(e)
+
+
+def _effort_label(speaker: str, override: str | None) -> str:
+    """The thinking level actually REQUESTED for a seat this turn, for the turn meta:
+    'off' when the provider's reasoning toggle is off (so no reasoning param is sent —
+    the effort dial is inert), the override value when set, else 'default' (reasoning on,
+    model default). (cli seats reason via their own runner; we surface 'off' since we
+    don't request/capture an api reasoning param for them.)"""
+    try:
+        on = providers.provider(speaker).reasoning
+    except ValueError:
+        on = False
+    if not on:
+        return "off"
+    return override or "default"
 
 
 def _reply_meta(reply) -> dict:
@@ -343,6 +358,8 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
             meta: dict = {"round_id": round_id}
             if rnd.judge_kind:
                 meta["judge_kind"] = rnd.judge_kind        # UI label: synthesis | map | divergence
+            if absent:                                     # who dropped + WHY (was lost before — only
+                meta["absent"] = [{"speaker": s, "error": e} for s, e in absent]   # reached the judge prompt)
             judge_used = judge
             try:
                 reply = _call_judge(judge, jpayload, effort, efforts.get(judge))
@@ -354,6 +371,7 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                 reply = _call_judge(judge_used, jpayload, effort, efforts.get(judge_used))
                 meta["judge_fallback_from"] = judge
             meta["model"] = providers.provider(judge_used).model
+            meta["reasoning_effort"] = _effort_label(judge_used, efforts.get(judge_used))
             meta.update(_reply_meta(reply))
             transcript.append(transcript.make_turn(mode.turn_mode, "judge", judge_used, reply.text, meta), path)
             last = reply.text
@@ -366,17 +384,20 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
         eff_ctx = rnd.context
         if rnd.role == "ai-raw" and selection.get("panel_context"):
             eff_ctx = selection["panel_context"]
+        # cache the big re-sent transcript prefix (converse / yes-and / transcript-panel)
+        cache_this = settings.PROMPT_CACHE and eff_ctx == "transcript"
         if rnd.degrade:
             with ThreadPoolExecutor(max_workers=max(1, len(speakers))) as ex:
                 results = list(ex.map(
                     lambda s: _panelist(s, _round_payload(rnd, s, prompt, doc_block, path, room, human_label, eff_ctx),
-                                        effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens),
+                                        effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens, cache=cache_this),
                     speakers))
         else:   # non-degrading single seat (converse): a failure propagates, as before
             s0 = speakers[0]
             reply0 = providers.call_model(
                 s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label, eff_ctx),
-                tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0))
+                tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0),
+                cache=cache_this)
             results = [(s0, reply0, None)]
 
         prior, absent = [], []
@@ -385,7 +406,8 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                 absent.append((speaker, err))
                 continue
             p = providers.provider(speaker)
-            meta = {"model": p.model, **_reply_meta(reply)}
+            meta = {"model": p.model, "reasoning_effort": _effort_label(speaker, efforts.get(speaker)),
+                    **_reply_meta(reply)}
             if mode.turn_mode != "converse":
                 meta = {"round_id": round_id, **meta}
             if rnd.role == "ai-raw":

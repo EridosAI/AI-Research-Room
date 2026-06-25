@@ -55,6 +55,27 @@ _margin_locks: dict[str, threading.Lock] = {}
 _meta_locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 _last_test: dict[str, dict] = {}   # in-memory last test result per provider
+_active_rounds: dict[str, int] = {}   # room_id -> in-flight round count (the "running" signal)
+_active_guard = threading.Lock()
+
+
+def _round_begin(room_id: str) -> None:
+    with _active_guard:
+        _active_rounds[room_id] = _active_rounds.get(room_id, 0) + 1
+
+
+def _round_end(room_id: str) -> None:
+    with _active_guard:
+        n = _active_rounds.get(room_id, 0) - 1
+        if n > 0:
+            _active_rounds[room_id] = n
+        else:
+            _active_rounds.pop(room_id, None)
+
+
+def _running(room_id: str) -> bool:
+    with _active_guard:
+        return room_id in _active_rounds
 
 
 def _room_lock(room_id: str) -> threading.Lock:
@@ -300,6 +321,8 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,
+        "running": _running(rid),                                   # a round is in flight in this room
+
         "mtime": meta.get("mtime"),
         "created": meta.get("ts"),                                  # room start
         "last_ts": (turns[-1].get("ts") if turns else meta.get("ts")),
@@ -370,7 +393,7 @@ def get_participants() -> dict:
     """Speaker colours + addressee list for the UI. No secrets — not guarded."""
     return {"participants": [
         {"name": k, "color": p.color, "enabled": p.enabled, "auth_mode": p.auth_mode,
-         "model": p.model, "base_url": p.base_url,
+         "model": p.model, "base_url": p.base_url, "reasoning": p.reasoning,
          "context_window": p.context_window, "effort_options": _effort_options(p),
          **_window_view(p)}
         for k, p in providers.registry().items()
@@ -499,33 +522,37 @@ def room_run(room_id: str, body: RunBody) -> dict:
         if who not in providers.registry():
             raise HTTPException(400, f"unknown provider: {who}")
     label = _load_ui().get("display_name") or "human"
-    with _room_lock(room_id):
-        try:
-            if body.mode == "converse":
-                result = modes.converse(room_id, body.prompt, addressed_to=body.target, human_label=label)
-            elif body.mode == "fusion":
-                result = modes.research(room_id, body.prompt, panel=body.panel, judge=body.judge,
-                                        effort=body.effort, panel_context=body.panel_context)
-            elif body.mode == "mapping":
-                result = modes.mapping(room_id, body.prompt, panel=body.panel, judge=body.judge,
-                                       effort=body.effort, panel_context=body.panel_context)
-            elif body.mode == "side_by_side":
-                result = modes.side_by_side(room_id, body.prompt, seats=body.seats or [], judge=body.judge,
+    _round_begin(room_id)   # the "running" signal; marked before the lock so a queued round shows too
+    try:
+        with _room_lock(room_id):
+            try:
+                if body.mode == "converse":
+                    result = modes.converse(room_id, body.prompt, addressed_to=body.target, human_label=label)
+                elif body.mode == "fusion":
+                    result = modes.research(room_id, body.prompt, panel=body.panel, judge=body.judge,
                                             effort=body.effort, panel_context=body.panel_context)
-            elif body.mode == "yes_and":
-                result = modes.yes_and(room_id, body.prompt, seats=body.seats or [],
-                                       effort=body.effort, human_label=label)
-            else:
-                raise HTTPException(400, f"unknown mode: {body.mode}")
-        except (FileNotFoundError, ValueError) as e:
-            raise HTTPException(400, str(e)) from e
-        except RuntimeError as e:
-            raise HTTPException(502, str(e)) from e
-        except HTTPException:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(502, f"{type(e).__name__}: {e}") from e
-        view = _full_room(room_id)
+                elif body.mode == "mapping":
+                    result = modes.mapping(room_id, body.prompt, panel=body.panel, judge=body.judge,
+                                           effort=body.effort, panel_context=body.panel_context)
+                elif body.mode == "side_by_side":
+                    result = modes.side_by_side(room_id, body.prompt, seats=body.seats or [], judge=body.judge,
+                                                effort=body.effort, panel_context=body.panel_context)
+                elif body.mode == "yes_and":
+                    result = modes.yes_and(room_id, body.prompt, seats=body.seats or [],
+                                           effort=body.effort, human_label=label)
+                else:
+                    raise HTTPException(400, f"unknown mode: {body.mode}")
+            except (FileNotFoundError, ValueError) as e:
+                raise HTTPException(400, str(e)) from e
+            except RuntimeError as e:
+                raise HTTPException(502, str(e)) from e
+            except HTTPException:
+                raise
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+            view = _full_room(room_id)
+    finally:
+        _round_end(room_id)
     _maybe_export(room_id)
     _maybe_artifacts(room_id, result)
     return {"result": result, "mode": body.mode, "room_id": room_id, "transcript": view}
