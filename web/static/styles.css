@@ -198,9 +198,9 @@ input, textarea { color: var(--text-primary); }
 .turn { margin: 0 0 16px; max-width: 880px; }
 .turn .who { font-size: var(--text-xs); font-weight: var(--weight-semibold); margin-bottom: 4px; color: var(--text-secondary); }
 .turn .body { background: var(--bg-tertiary); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 10px 14px; }
-.turn.human { margin-left: auto; }
+/* human turns share the left column flow with model turns (Phase 33.1) — the accent
+   tint + border and the name label carry the "this is me" signal, not alignment. */
 .turn.human .body { background: var(--accent-subtle); border-color: var(--accent-border); }
-.turn.human .who { text-align: right; }
 
 /* composite research round — elevated container, panels raised again inside */
 .round { border: 1px solid var(--border-subtle); border-radius: var(--radius-xl); padding: 14px;
@@ -227,6 +227,8 @@ input, textarea { color: var(--text-primary); }
 .artifact-label { font-size: var(--text-xs); color: var(--text-secondary); margin-right: auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-btn { font-size: 11.5px; padding: 2px 9px; }
+.artifact-label.clickable { cursor: pointer; }               /* → opens in the viewer pane (Phase 33.4) */
+.artifact-label.clickable:hover { color: var(--accent-text); text-decoration: underline; }
 /* auto-saved (Phase 32.4): the chip names the saved file — a subtle accent edge + mono label */
 .artifact.saved { border-color: var(--accent-border); }
 .artifact.saved .artifact-label { color: var(--text-primary); font-family: var(--font-mono); }
@@ -365,6 +367,40 @@ input, textarea { color: var(--text-primary); }
 #margin-input { flex: 1; resize: vertical; background: var(--bg-tertiary); color: var(--text-primary);
   border: 1px solid var(--border-default); border-radius: var(--radius-lg); padding: 7px 9px; }
 #margin-status { padding: 0 12px 8px; }
+
+/* artifact viewer pane (Phase 33) — margin-sibling right pane that renders a ```markdown
+   block as a document. Chrome mirrors the margin; the body carries document-grade .md. */
+.viewer { flex: 0 0 auto; width: 500px; min-width: 320px; max-width: none;
+  display: flex; flex-direction: column; border-left: 1px solid var(--border-default); min-height: 0; }
+.viewer.hidden { display: none; }
+.viewer-splitter { flex: 0 0 5px; cursor: col-resize; background: var(--border-default); opacity: .5; }
+.viewer-splitter:hover { opacity: 1; background: var(--accent); }
+.viewer-splitter.hidden { display: none; }
+.viewer-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle); }
+.viewer-head .viewer-title { font-weight: var(--weight-semibold); font-size: var(--text-sm); margin-right: auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.viewer-copypath { font-size: 11.5px; padding: 2px 9px; }
+.viewer-body { flex: 1; overflow-y: auto; padding: 18px 22px; }
+
+/* document-grade markdown — scoped to the viewer so chat bubbles' .md is pixel-unchanged.
+   The id selector outranks the chat-grade .md rules; reuses the existing token system. */
+#viewer .md { max-width: none; line-height: 1.6; }
+#viewer .md h1 { font-size: 1.7em; font-weight: var(--weight-semibold); line-height: 1.25; margin: .7em 0 .4em; }
+#viewer .md h2 { font-size: 1.35em; font-weight: var(--weight-semibold); margin: .95em 0 .35em;
+  padding-bottom: .2em; border-bottom: 1px solid var(--border-subtle); }
+#viewer .md h3 { font-size: 1.12em; font-weight: var(--weight-semibold); margin: .8em 0 .3em; }
+#viewer .md p, #viewer .md li { line-height: 1.6; }
+#viewer .md table { border-collapse: collapse; margin: .7em 0; max-width: 100%; }
+#viewer .md th, #viewer .md td { border: 1px solid var(--border-default); padding: 5px 10px; text-align: left;
+  vertical-align: top; }
+#viewer .md th { background: var(--bg-elevated); font-weight: var(--weight-semibold); }
+#viewer .md hr { border: none; border-top: 1px solid var(--border-subtle); margin: 1.2em 0; }
+#viewer .md blockquote { margin: .7em 0; padding: .2em 1em; border-left: 3px solid var(--accent-border);
+  color: var(--text-secondary); }
+#viewer .md pre { background: var(--bg-primary); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md); padding: 12px; overflow-x: auto; }
+#viewer .md code { overflow-wrap: anywhere; }
 
 /* model-square bar — one tile per active panelist (dot + spend), + a session total */
 .model-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px;

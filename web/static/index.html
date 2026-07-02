@@ -210,9 +210,23 @@
         </footer>
       </div>
 
+      <!-- artifact viewer (Phase 33): renders a turn's ```markdown block as a document
+           (source of truth = turn.text). Sits ADJACENT to the transcript (Phase 34) — it's
+           working material; the margin (peripheral commentary) is outermost. -->
+      <div id="viewer-splitter" class="viewer-splitter hidden"></div>
+      <aside id="viewer" class="viewer hidden">
+        <div class="viewer-head">
+          <span id="viewer-title" class="viewer-title">artifact</span>
+          <button id="viewer-copypath" class="viewer-copypath hidden" title="copy the saved file path">copy path</button>
+          <button id="viewer-close" title="close the viewer">×</button>
+        </div>
+        <div id="viewer-body" class="viewer-body"></div>
+      </aside>
+
       <!-- the margin: a window inside the window. Reads main (read-only, filtered,
            windowed) as background; writes only to its own margin.jsonl. One-way by
-           default — margin → main only via an explicit "copy to main" per answer. -->
+           default — margin → main only via an explicit "copy to main" per answer.
+           OUTERMOST pane (Phase 34) — panes coexist on wide screens. -->
       <div id="margin-splitter" class="margin-splitter hidden"></div>
       <aside id="margin" class="margin hidden">
         <div class="margin-head">

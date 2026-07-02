@@ -188,6 +188,17 @@ Two layers, cleanly split:
   room (panel, judge, converse — via a system-prompt line) is told the path, an auto-saved block
   stamps the saved path on the turn, and the chip shows the **filename + a "copy path"** button for
   the hand-off. Markdown only — no execution, one rule.
+- **Artifact viewer pane.** Click **open** on an artifact chip (or the filename) and the ` ```markdown `
+  block renders as a **document** in a right-side pane with its own scroll — headings, tables, nested
+  fences — so the transcript stays live while the spec stays in view. Width persists per room, Esc
+  closes it (after any open overlay), and switching rooms closes it. Source of truth is the turn's own
+  text — no disk read. (Human turns now sit in the same left column flow as model turns; the accent
+  tint + label carry "this is me".)
+- **Panes coexist on wide screens.** The layout is `[transcript | viewer | margin]` (viewer adjacent
+  to the transcript, margin outermost). Viewer and margin open **together** whenever the transcript
+  keeps a minimum readable width; on a narrower window opening one closes the other. Splitter drags
+  can't crush the transcript, and shrinking the window (or widening the sidebar) with both open yields
+  the margin first. No mode to toggle — it just tracks the space you have.
 - **Room hover preview.** Hovering a room in the sidebar shows its models, start/last dates, and a
   truncated summary — instantly, from `room.json`/the JSONL, no model call.
 - **Multi-room concurrency.** Each room has its own lock, so a slow research round in one
@@ -423,6 +434,8 @@ python tests/browser_phase30.py        # round-in-progress signal (in-room + sid
 python tests/browser_phase31.py        # composer focus + per-room drafts + optimistic send + ⌘K/Ctrl-K switcher
 python tests/engine_phase32.py         # per-room artifacts: dir resolution + guard across seats + meta stamp/isolation
 python tests/browser_phase32.py        # artifacts-dir overlay round-trip + saved chip (filename + copy-path)
+python tests/browser_phase33.py        # artifact viewer pane (open/render/resize/Esc) + human-bubble realignment
+python tests/browser_phase34.py        # pane coexistence: wide→both, narrow→swap, splitter clamp, resize/sidebar
 ```
 
 ## Environment

@@ -216,6 +216,27 @@ ring — without disturbing the other seats' context. Until then the numerator i
   turns auto-save — raw panels deliberately do NOT). Revisit with a real atomic allocation (O_EXCL
   create-and-retry, or a per-room counter in `room.json`) if artifact writes ever parallelize.
 
+## Deferred from Phase 33 (artifact viewer pane)
+
+- **Live-file viewer mode.** The viewer renders the turn's own `turn.text` (the ` ```markdown ` block
+  as authored) — a snapshot, not the file on disk. When a turn carries `meta.artifact_paths`, a "live"
+  toggle could instead read the saved `.md` from disk (via a new read endpoint) so you SEE Claude
+  Code's edits to that file. Deferred: needs a file-read endpoint (+ path-safety scoping to the
+  artifacts dir) and a refresh/poll story; the snapshot covers the common "read the spec I just
+  generated" case.
+- **Simultaneous margin + viewer — SHIPPED (Phase 34).** The two right panes now coexist as
+  `[transcript | viewer | margin]` whenever the transcript keeps ≥ `MIN_MAIN` (520px); otherwise
+  opening one swaps the other (the old behavior, now width-gated). Splitter drags clamp to preserve
+  `MIN_MAIN`; window-shrink / sidebar-widen with both open yields the margin (see
+  `tests/browser_phase34.py`). Still deferred: **recency-based
+  close-on-shrink** — the yield rule is a FIXED "margin first, always" (no tracking of which pane you
+  touched last). If that ever annoys (you're actively using the margin and it's the one that vanishes),
+  close the least-recently-focused pane instead; needs a per-pane last-interaction timestamp.
+- **Margin Esc-dismissal consistency.** The viewer closes on Esc (after overlays); the margin still
+  does NOT (× / toggle only). Left asymmetric on purpose — the margin is a persistent workspace, the
+  viewer a transient reading pane — but if it reads as inconsistent in use, give the margin the same
+  Esc treatment (it would slot in after the viewer in the precedence chain).
+
 ## Next up (not deferred, just not started)
 
 - **Packaging / installable.** The whole point of settling the surface first: package this

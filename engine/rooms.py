@@ -89,6 +89,7 @@ def _default_meta(room_id: str, title: str) -> dict:
         "tags": [],           # user-set; written into the exported .md frontmatter
         "reasoning_effort": {},   # {panelist_key: "high"|"medium"|"low"} overrides; empty = model default
         "artifacts_dir": "",  # per-room artifacts dir override; "" = inherit the global (Phase 32.1)
+        "viewer_width": None, # per-room artifact-viewer pane width (px); null = CSS default (Phase 33.2)
         "ts": _now(),
     }
 
@@ -147,7 +148,7 @@ def load_room(room_id: str) -> dict:
 
 
 _MUTABLE = {"title", "participants", "judge", "margin_model",
-            "splitter_width", "last_read_pos", "tags", "reasoning_effort", "artifacts_dir"}
+            "splitter_width", "last_read_pos", "tags", "reasoning_effort", "artifacts_dir", "viewer_width"}
 
 
 def update_room(room_id: str, **fields) -> dict:

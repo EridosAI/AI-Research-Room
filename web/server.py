@@ -153,6 +153,7 @@ class RoomUpdate(BaseModel):
     tags: list[str] | None = None
     reasoning_effort: dict | None = None   # {panelist_key: "high"|"medium"|"low"} per-room overrides
     artifacts_dir: str | None = None       # per-room artifacts dir override; "" = inherit global (Phase 32.1)
+    viewer_width: float | None = None      # per-room artifact-viewer pane width, px (Phase 33.2)
 
 
 class UIBody(BaseModel):
@@ -320,6 +321,7 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "tags": meta.get("tags", []),
         "reasoning_effort": meta.get("reasoning_effort", {}),
         "artifacts_dir": meta.get("artifacts_dir", ""),   # per-room override ("" = inherit global; Phase 32.1)
+        "viewer_width": meta.get("viewer_width"),         # artifact-viewer pane width (Phase 33.2)
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,

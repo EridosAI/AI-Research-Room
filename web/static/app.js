@@ -31,6 +31,7 @@ let STATE = {
   ui: { sidebar_collapsed: false, sidebar_width: 260 },
   marginTurns: [],           // active room's margin.jsonl
   marginOpen: false,
+  viewerOpen: false,         // artifact viewer pane (Phase 33); mutually exclusive with the margin
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
@@ -457,15 +458,23 @@ function artifactControls(t) {
     const row = el("div", "artifact");
     const lab = el("span", "artifact-label");
     const savedPath = matched ? saved[i] : null;
+    const title = savedPath ? baseName(savedPath) : `markdown artifact${blocks.length > 1 ? " " + (i + 1) : ""}`;
     if (savedPath) { row.classList.add("saved"); lab.textContent = "📄 " + baseName(savedPath); lab.title = "saved to " + savedPath; }
     else lab.textContent = `📄 markdown artifact${blocks.length > 1 ? " " + (i + 1) : ""}`;
+    // open the block rendered in the right-side viewer pane (Phase 33.4) — source is the
+    // turn's own text (already in this closure), no endpoint. The filename is a click
+    // target too, and the "open" button carries the discoverable/a11y affordance.
+    const openThis = () => openViewer({ title, content, savedPath });
+    lab.classList.add("clickable"); lab.addEventListener("click", openThis);
+    const open = el("button", "artifact-btn"); open.textContent = "open";
+    open.addEventListener("click", openThis);
     const copy = el("button", "artifact-btn"); copy.textContent = "copy";
     copy.addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(content); copy.textContent = "copied ✓";
             setTimeout(() => (copy.textContent = "copy"), 1200); }
       catch (e) { banner("copy failed: " + e.message); }
     });
-    row.append(lab, copy);
+    row.append(lab, open, copy);
     if (savedPath) row.append(copyPathBtn(savedPath));   // auto-saved → offer its path
     const save = el("button", "artifact-btn"); save.textContent = "save";
     save.addEventListener("click", async () => {
@@ -905,6 +914,7 @@ function applyUI() {
   sb.classList.toggle("collapsed", !!STATE.ui.sidebar_collapsed);
   $("#sidebar-expand").classList.toggle("hidden", !STATE.ui.sidebar_collapsed);
   applyComposerHeight();
+  enforcePaneFit();   // sidebar collapse/expand changes workspace width → re-check coexistence (Phase 34.3)
 }
 
 // composer (the model-bar + mode + input zone) height — dragged via #composer-resizer,
@@ -992,6 +1002,7 @@ function adoptRoom(view) {
     tags: view.tags || [],
     reasoning_effort: view.reasoning_effort || {},
     artifacts_dir: view.artifacts_dir || "",   // per-room override; "" = inherit global (Phase 32.1)
+    viewer_width: view.viewer_width || null,    // per-room viewer pane width (Phase 33.2)
   };
   STATE.turns = view.turns || [];
   STATE.pending = null;                 // authoritative turns supersede any optimistic bubble (Phase 31.3)
@@ -1000,6 +1011,7 @@ function adoptRoom(view) {
   render();
   renderMargin();                       // show THIS room's own margin
   if (STATE.marginOpen) applyMarginWidth();
+  if (STATE.viewerOpen) applyViewerWidth();
   watchActiveRoom(!!view.running);      // round-in-progress signal (Phase 30)
 }
 
@@ -1060,6 +1072,7 @@ async function switchRoom(id) {
   if (STATE.room && STATE.room.id === id) { focusComposer(); return; }   // already here — no-op re-adopt
   banner(null); setStatus("");   // a background round's status must not bleed across rooms
   stashDrafts();                 // save the room we're leaving BEFORE adopt swaps STATE.room (Phase 31.2)
+  closeViewer();                 // the viewer's content belongs to the room we're leaving (Phase 33.2)
   STATE.staged = []; renderStagedFiles();   // staged files belong to the room you left
   try {
     const view = await api(`/rooms/${id}/activate`, "POST");   // sets active + marks read
@@ -1074,6 +1087,7 @@ async function newRoom() {
   const title = prompt("room title:");
   if (!title) return;
   stashDrafts();                 // preserve the room we're leaving (Phase 31.2)
+  closeViewer();                 // a fresh room has no artifact open (Phase 33.2)
   try {
     const data = await api("/rooms", "POST", { title });   // EMPTY room — forced decision
     adoptRoom(data.room);
@@ -1355,6 +1369,24 @@ function renderMargin() {
   box.scrollTop = box.scrollHeight;
 }
 
+// ===== pane coexistence (Phase 34) ===========================================
+// Both right panes (viewer + margin) may be open at once IFF the transcript column keeps a
+// minimum readable width; otherwise opening one closes the other (Phase 33 behavior). Row
+// order after 34.1: [main-col | v-splitter | viewer | m-splitter | margin].
+const MIN_MAIN = 520;     // px — the transcript never shrinks below this when BOTH panes are open
+const SPLITTER_PX = 5;    // each pane's drag handle (matches .margin-splitter / .viewer-splitter)
+function workspaceWidth() { const w = document.querySelector(".workspace"); return w ? w.clientWidth : window.innerWidth; }
+function viewerWidth() { return (STATE.room && STATE.room.viewer_width) || 500; }   // stored, else the CSS default
+function marginWidth() { return (STATE.room && STATE.room.splitter_width) || 340; }
+// would the transcript + BOTH panes (widths vW, mW) still leave ≥ MIN_MAIN for the transcript?
+function fitsBoth(vW, mW) { return workspaceWidth() - vW - mW - 2 * SPLITTER_PX >= MIN_MAIN; }
+// resize / sidebar toggle can violate the fit after both are open — yield the MARGIN (a
+// deliberate fixed rule: the peripheral channel always gives way; no recency, no thrash —
+// once it's closed only one pane remains and the guard is inert).
+function enforcePaneFit() {
+  if (STATE.viewerOpen && STATE.marginOpen && !fitsBoth(viewerWidth(), marginWidth())) closeMargin();
+}
+
 function applyMarginWidth() {
   const w = STATE.room && STATE.room.splitter_width;
   if (w) $("#margin").style.width = w + "px";
@@ -1362,6 +1394,8 @@ function applyMarginWidth() {
 
 function openMargin() {
   if (!STATE.room) return;
+  // coexist with the viewer iff the transcript still fits; else swap (Phase 34.2)
+  if (STATE.viewerOpen && !fitsBoth(viewerWidth(), marginWidth())) closeViewer();
   STATE.marginOpen = true;
   $("#margin").classList.remove("hidden");
   $("#margin-splitter").classList.remove("hidden");
@@ -1372,6 +1406,44 @@ function closeMargin() {
   $("#margin").classList.add("hidden");
   $("#margin-splitter").classList.add("hidden");
   focusComposer();               // return the caret to the main composer (Phase 31.1)
+}
+
+// ===== artifact viewer pane (Phase 33) =======================================
+// A right-side pane that renders a turn's ```markdown block as a DOCUMENT (source of
+// truth = turn.text, passed in from the chip closure — no endpoint, no disk read).
+// Mutually exclusive with the margin; per-room width (viewer_width, splitter_width
+// precedent); closes on room switch (its content belongs to the room you're leaving).
+function applyViewerWidth() {
+  const w = STATE.room && STATE.room.viewer_width;
+  if (w) $("#viewer").style.width = w + "px";   // else the CSS default (wider than the margin)
+}
+function openViewer(art) {
+  if (!STATE.room) return;
+  // coexist with the margin iff the transcript still fits; else swap (Phase 34.2)
+  if (STATE.marginOpen && !fitsBoth(viewerWidth(), marginWidth())) closeMargin();
+  STATE.viewerOpen = true;
+  const savedPath = art && art.savedPath;
+  $("#viewer-title").textContent = (art && art.title) || "artifact";
+  $("#viewer-title").title = savedPath || (art && art.title) || "";
+  const cp = $("#viewer-copypath");
+  cp.classList.toggle("hidden", !savedPath);    // copy-path only when the block was saved (has meta)
+  cp.onclick = savedPath ? (async () => {
+    try { await navigator.clipboard.writeText(savedPath); cp.textContent = "copied ✓";
+          setTimeout(() => (cp.textContent = "copy path"), 1200); }
+    catch (e) { banner("copy failed: " + e.message); }
+  }) : null;
+  renderMd($("#viewer-body"), (art && art.content) || "");   // vendored renderer; #viewer .md styles it as a doc
+  $("#viewer-body").scrollTop = 0;                            // a fresh artifact starts at the top
+  $("#viewer").classList.remove("hidden");
+  $("#viewer-splitter").classList.remove("hidden");
+  applyViewerWidth();
+}
+function closeViewer() {
+  if (!STATE.viewerOpen) return;                // no-op when already closed (don't steal focus)
+  STATE.viewerOpen = false;
+  $("#viewer").classList.add("hidden");
+  $("#viewer-splitter").classList.add("hidden");
+  focusComposer();               // parity with closeMargin (Phase 31.1)
 }
 
 async function marginSend() {
@@ -1438,7 +1510,11 @@ $("#margin-model").addEventListener("change", async (e) => {
   rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
-    const w = Math.max(240, Math.min(640, window.innerWidth - e.clientX));
+    // margin is the rightmost pane → right edge is the viewport edge. Dynamic max keeps the
+    // transcript ≥ MIN_MAIN even with the viewer open to its left (Phase 34.3).
+    const viewerStuff = STATE.viewerOpen ? viewerWidth() + SPLITTER_PX : 0;
+    const dynMax = Math.min(640, workspaceWidth() - MIN_MAIN - SPLITTER_PX - viewerStuff);
+    const w = Math.max(240, Math.min(dynMax, window.innerWidth - e.clientX));
     if (STATE.room) STATE.room.splitter_width = w;
     $("#margin").style.width = w + "px";
   });
@@ -1447,6 +1523,32 @@ $("#margin-model").addEventListener("change", async (e) => {
     if (STATE.room) api(`/rooms/${STATE.room.id}`, "PUT", { splitter_width: STATE.room.splitter_width }).catch(() => {});
   });
 })();
+$("#viewer-close").addEventListener("click", closeViewer);
+(function wireViewerSplitter() {
+  const rez = $("#viewer-splitter"); if (!rez) return;
+  let dragging = false;
+  rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    // after 34.1 the viewer sits BETWEEN the transcript and the margin — so when the margin
+    // is open the viewer's right edge is inset by the margin (+ its splitter), not the
+    // viewport edge. Dynamic max keeps the transcript ≥ MIN_MAIN (Phase 34.3).
+    const marginStuff = STATE.marginOpen ? marginWidth() + SPLITTER_PX : 0;
+    const rightEdge = window.innerWidth - marginStuff;
+    const dynMax = workspaceWidth() - MIN_MAIN - SPLITTER_PX - marginStuff;   // only limit: keep the transcript ≥ MIN_MAIN
+    const w = Math.max(320, Math.min(dynMax, rightEdge - e.clientX));
+    if (STATE.room) STATE.room.viewer_width = w;
+    $("#viewer").style.width = w + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return; dragging = false;
+    if (STATE.room) api(`/rooms/${STATE.room.id}`, "PUT", { viewer_width: STATE.room.viewer_width }).catch(() => {});
+  });
+})();
+// window resize (debounced) → re-check coexistence; the sidebar toggle path re-checks via
+// applyUI, and the sidebar drag via its own mouseup (Phase 34.3).
+let _fitTimer = null;
+window.addEventListener("resize", () => { clearTimeout(_fitTimer); _fitTimer = setTimeout(enforcePaneFit, 150); });
 $("#input").addEventListener("keydown", (e) => {
   // Enter sends; Shift+Enter inserts a newline. isComposing guard: don't swallow
   // an IME candidate-commit (also pressed via Enter) as a send.
@@ -1497,6 +1599,7 @@ $("#sidebar-expand").addEventListener("click", () => setUI({ sidebar_collapsed: 
   });
   window.addEventListener("mouseup", () => {
     if (!dragging) return; dragging = false;
+    enforcePaneFit();   // a wider sidebar shrinks the workspace → re-check coexistence (Phase 34.3)
     api("/ui", "PUT", { sidebar_width: STATE.ui.sidebar_width }).catch(() => {});
   });
 })();
@@ -1917,7 +2020,13 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K") && !e.isComposing) {
     e.preventDefault(); paletteOpen() ? closePalette() : openPalette(); return;
   }
-  if (e.key === "Escape") { if (closeAnyOverlay()) e.preventDefault(); return; }
+  if (e.key === "Escape") {
+    // deliberate precedence (Phase 33.2): a transient overlay (palette/settings/providers)
+    // closes before the persistent viewer pane. The margin stays non-Esc-dismissable.
+    if (closeAnyOverlay()) { e.preventDefault(); return; }
+    if (STATE.viewerOpen) { e.preventDefault(); closeViewer(); return; }
+    return;
+  }
   if (!paletteOpen()) return;
   if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); movePalette(-1); }
