@@ -473,9 +473,36 @@ def _guard_no_search(payload: dict, searches: bool) -> dict:
     return {**payload, "system": sys}
 
 
+# Artifacts-awareness line (Phase 32.2). Folded into a seat's system prompt — like the
+# no-search guard, and for the same reason: it's applied HERE in call_model, the single
+# path EVERY seat flows through (panel + judge, blind + transcript), so `room_system`'s
+# blind-spots (it skips the judge and blind panelists — both artifact producers) don't
+# apply. Present only when the room resolves an artifacts dir; absent otherwise (never
+# advertise a save that won't happen). System-slot config, not transcript content — the
+# forward-context invariant is untouched (build_context still serializes only turn.text).
+ARTIFACTS_GUARD_TMPL = (
+    "Artifacts: any fenced ```markdown block you produce is automatically saved as a "
+    ".md file to: {dir}. When a spec or document references companion files, use paths "
+    "under that directory."
+)
+
+
+def _guard_artifacts(payload: dict, artifacts_dir: str | None) -> dict:
+    """Fold the artifacts-awareness line into the system prompt when the room resolves an
+    artifacts dir; unchanged otherwise. Returns a COPY (never mutates a shared payload),
+    and handles the empty-system case (blind rounds) exactly like _guard_no_search."""
+    if not artifacts_dir or not str(artifacts_dir).strip():
+        return payload
+    line = ARTIFACTS_GUARD_TMPL.format(dir=str(artifacts_dir).strip())
+    sys = (payload.get("system") or "").strip()
+    sys = f"{sys}\n\n{line}".strip() if sys else line
+    return {**payload, "system": sys}
+
+
 def call_model(provider_key: str, payload: dict, tools: bool = False,
                effort: str = "medium", max_tokens: int | None = None,
-               reasoning_effort: str | None = None, cache: bool = False) -> ModelReply:
+               reasoning_effort: str | None = None, cache: bool = False,
+               artifacts_dir: str | None = None) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -495,6 +522,7 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     # runner on a tools=True call; otherwise it gets the no-search guard.
     searches = do_search or (p.auth_mode == "cli" and tools)
     payload = _guard_no_search(payload, searches)
+    payload = _guard_artifacts(payload, artifacts_dir)   # room artifacts dir → awareness line (Phase 32.2)
     if p.backend == "mock":
         text = _mock_text(p, payload)
         rsn = (f"[mock reasoning · {p.key}] step 1 … step 2 … therefore." if p.reasoning else None)

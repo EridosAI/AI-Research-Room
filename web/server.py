@@ -152,6 +152,7 @@ class RoomUpdate(BaseModel):
     last_read_pos: int | None = None
     tags: list[str] | None = None
     reasoning_effort: dict | None = None   # {panelist_key: "high"|"medium"|"low"} per-room overrides
+    artifacts_dir: str | None = None       # per-room artifacts dir override; "" = inherit global (Phase 32.1)
 
 
 class UIBody(BaseModel):
@@ -318,6 +319,7 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "splitter_width": meta.get("splitter_width"),
         "tags": meta.get("tags", []),
         "reasoning_effort": meta.get("reasoning_effort", {}),
+        "artifacts_dir": meta.get("artifacts_dir", ""),   # per-room override ("" = inherit global; Phase 32.1)
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,
@@ -354,14 +356,10 @@ def _maybe_export(room_id: str) -> None:
         pass
 
 
-def _maybe_artifacts(room_id: str, text: str) -> None:
-    """Best-effort auto-write of any ```markdown blocks in a model's answer. Unset
-    artifacts_dir → skip; failures swallowed (never fail the turn). Manual save +
-    copy in the UI work regardless."""
-    try:
-        artifacts.auto_write(room_id, text, _load_ui().get("artifacts_dir"))
-    except Exception:  # noqa: BLE001
-        pass
+# Artifact auto-write moved INTO the turn lifecycle (Phase 32.3): run_mode writes any
+# ```markdown blocks + stamps meta.artifact_paths on the forward turn BEFORE append, so
+# the save is visible in the transcript. The post-hoc _maybe_artifacts calls were removed
+# (the manual-save endpoint below still uses artifacts.resolve_artifacts_dir directly).
 
 
 _UI_DEFAULT = {"sidebar_collapsed": False, "sidebar_width": 260, "composer_height": None,
@@ -483,7 +481,6 @@ def room_research(room_id: str, body: ResearchBody) -> dict:
             raise HTTPException(502, f"{type(e).__name__}: {e}") from e
         view = _full_room(room_id)
     _maybe_export(room_id)
-    _maybe_artifacts(room_id, synthesis)
     # room_id lets the client decide whether this belongs on the active screen.
     return {"synthesis": synthesis, "room_id": room_id, "transcript": view}
 
@@ -503,7 +500,6 @@ def room_converse(room_id: str, body: ConverseBody) -> dict:
             raise HTTPException(502, f"{type(e).__name__}: {e}") from e
         view = _full_room(room_id)
     _maybe_export(room_id)
-    _maybe_artifacts(room_id, reply)
     return {"reply": reply, "room_id": room_id, "transcript": view}
 
 
@@ -554,7 +550,6 @@ def room_run(room_id: str, body: RunBody) -> dict:
     finally:
         _round_end(room_id)
     _maybe_export(room_id)
-    _maybe_artifacts(room_id, result)
     return {"result": result, "mode": body.mode, "room_id": room_id, "transcript": view}
 
 
@@ -642,9 +637,9 @@ def save_artifact(room_id: str, body: ArtifactBody) -> dict:
     _require_room(room_id)
     if not body.content.strip():
         raise HTTPException(400, "empty artifact")
-    adir = _load_ui().get("artifacts_dir")
+    adir = artifacts.resolve_artifacts_dir(room_id)   # per-room override → global fallback (Phase 32.1)
     if not adir or not str(adir).strip():
-        raise HTTPException(400, "no artifacts directory set (Settings → Data)")
+        raise HTTPException(400, "no artifacts directory set (room settings, or Settings → Data)")
     try:
         path = artifacts.save_artifact(room_id, body.content, adir)
     except Exception as e:  # noqa: BLE001

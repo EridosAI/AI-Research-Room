@@ -32,6 +32,9 @@ let STATE = {
   marginTurns: [],           // active room's margin.jsonl
   marginOpen: false,
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
+  drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
+  marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
+  pending: null,             // optimistic user turn {text, ts} awaiting the server (Phase 31.3)
 };
 
 // ===== theme mode (dark / light / system) ===================================
@@ -167,6 +170,18 @@ function setStatus(msg, busy) {
   if (msg) s.appendChild(document.createTextNode(msg));
 }
 
+// Focus the composer — but never yank focus out of an open overlay/palette, and never
+// scroll-jump. Called from the four sites recon confirmed leave focus nowhere: app load,
+// room switch, new-room create, margin close (Phase 31.1). A missing overlay element
+// (order-independent) is simply skipped.
+function focusComposer() {
+  const blocked = ["#room-settings-overlay", "#providers-overlay", "#palette-overlay"]
+    .some((s) => { const e = $(s); return e && !e.classList.contains("hidden"); });
+  if (blocked) return;
+  const input = $("#input");
+  if (input) input.focus({ preventScroll: true });
+}
+
 // ===== API ===================================================================
 async function api(path, method, body) {
   const opts = { method: method || "GET" };
@@ -207,6 +222,20 @@ function renderConverse(t) {
   renderMd(body, t.text); div.appendChild(body);
   appendTurnFooter(div, t);                 // thinking + model pills, reasoning body below
   const ac = artifactControls(t); if (ac) div.appendChild(ac);
+  return div;
+}
+
+// The optimistic user turn (Phase 31.3): the just-sent message painted immediately,
+// before the server round-trip, with a subtle pending affordance (dimmed + a spinner
+// matching the status idiom). Transient — adoptRoom nulls STATE.pending so the
+// authoritative server turn replaces it in the same paint; no IDs, no reconciliation.
+function renderPending(p) {
+  const div = el("div", "turn human pending");
+  div.appendChild(whoLine(displayName(), colorOf("human"), ""));
+  const body = el("div", "body"); renderMd(body, p.text); div.appendChild(body);
+  const foot = el("div", "pending-foot");
+  foot.append(el("span", "spinner"), document.createTextNode("sending…"));
+  div.appendChild(foot);
   return div;
 }
 
@@ -399,27 +428,58 @@ function extractMdBlocks(text) {
   while ((m = re.exec(text || ""))) { const c = m[1].trim(); if (c) out.push(c); }
   return out;
 }
+function baseName(p) { return String(p || "").split(/[\\/]/).filter(Boolean).pop() || String(p || ""); }
+
+// "copy path" — the CC-handoff gesture (Phase 32.4): clipboard gets the saved .md path so
+// you can hand it straight to Claude Code / a spec that references companion files.
+function copyPathBtn(path) {
+  const cp = el("button", "artifact-btn"); cp.textContent = "copy path"; cp.title = path;
+  cp.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(path); cp.textContent = "copied ✓";
+          setTimeout(() => (cp.textContent = "copy path"), 1200); }
+    catch (e) { banner("copy failed: " + e.message); }
+  });
+  return cp;
+}
+
+// Artifact chips under a turn (Phase 14 detection; Phase 32.4 saved-state). Detection stays
+// client-side (a ```markdown block); when the turn ALSO carries meta.artifact_paths (32.3
+// auto-save), the chip upgrades to the saved FILENAME + a "copy path" button (tooltip = full
+// path). Block↔path is positional — on a count mismatch we fall back to detection-only rather
+// than guess. Legacy turns (no meta) and no-dir rooms render exactly as before.
 function artifactControls(t) {
   const blocks = extractMdBlocks(t.text);
   if (!blocks.length) return null;
+  const saved = (t.meta && t.meta.artifact_paths) || [];
+  const matched = saved.length === blocks.length;      // positional match or bust
   const wrap = el("div", "artifacts");
   blocks.forEach((content, i) => {
     const row = el("div", "artifact");
     const lab = el("span", "artifact-label");
-    lab.textContent = `📄 markdown artifact${blocks.length > 1 ? " " + (i + 1) : ""}`;
+    const savedPath = matched ? saved[i] : null;
+    if (savedPath) { row.classList.add("saved"); lab.textContent = "📄 " + baseName(savedPath); lab.title = "saved to " + savedPath; }
+    else lab.textContent = `📄 markdown artifact${blocks.length > 1 ? " " + (i + 1) : ""}`;
     const copy = el("button", "artifact-btn"); copy.textContent = "copy";
     copy.addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(content); copy.textContent = "copied ✓";
             setTimeout(() => (copy.textContent = "copy"), 1200); }
       catch (e) { banner("copy failed: " + e.message); }
     });
+    row.append(lab, copy);
+    if (savedPath) row.append(copyPathBtn(savedPath));   // auto-saved → offer its path
     const save = el("button", "artifact-btn"); save.textContent = "save";
     save.addEventListener("click", async () => {
       if (!STATE.room) return;
-      try { const r = await api(`/rooms/${STATE.room.id}/artifact`, "POST", { content }); banner(`Saved ${r.path}`); }
-      catch (e) { banner(e.message); }
+      try {
+        const r = await api(`/rooms/${STATE.room.id}/artifact`, "POST", { content });
+        banner(`Saved ${r.path}`);
+        if (r.path && !row.classList.contains("saved")) {  // reflect the manual save on the chip (32.4)
+          row.classList.add("saved"); lab.textContent = "📄 " + baseName(r.path); lab.title = "saved to " + r.path;
+          row.insertBefore(copyPathBtn(r.path), save);
+        }
+      } catch (e) { banner(e.message); }
     });
-    row.append(lab, copy, save); wrap.append(row);
+    row.append(save); wrap.append(row);
   });
   return wrap;
 }
@@ -506,7 +566,7 @@ function render() {
     main.innerHTML = '<div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>';
     return;
   }
-  if (!STATE.turns.length) {
+  if (!STATE.turns.length && !STATE.pending) {
     const roster = (STATE.room.participants || []).length;
     main.innerHTML = roster
       ? '<div class="empty">Empty room — send the first message.</div>'
@@ -514,6 +574,7 @@ function render() {
     return;
   }
   for (const b of groupTurns(STATE.turns)) main.appendChild(b.type === "round" ? renderRound(b) : renderConverse(b.turn));
+  if (STATE.pending) main.appendChild(renderPending(STATE.pending));   // optimistic user turn (Phase 31.3)
   main.scrollTop = main.scrollHeight;
 }
 
@@ -930,8 +991,10 @@ function adoptRoom(view) {
     splitter_width: view.splitter_width || null,
     tags: view.tags || [],
     reasoning_effort: view.reasoning_effort || {},
+    artifacts_dir: view.artifacts_dir || "",   // per-room override; "" = inherit global (Phase 32.1)
   };
   STATE.turns = view.turns || [];
+  STATE.pending = null;                 // authoritative turns supersede any optimistic bubble (Phase 31.3)
   if (view.margin_turns !== undefined) STATE.marginTurns = view.margin_turns || [];
   renderComposerPickers();
   render();
@@ -977,24 +1040,47 @@ async function markRead(id, count) {
   try { await api(`/rooms/${id}`, "PUT", { last_read_pos: count }); } catch (e) { /* non-fatal */ }
 }
 
+// Per-room composer drafts (Phase 31.2): a session-only, in-memory map so typed text
+// doesn't bleed across the single shared #input / #margin-input when you switch rooms.
+// Deliberately NOT persisted — ui.json is a global scalar store and message text has no
+// business in a config file (cross-restart drafts are DEFERRED). The margin-input element
+// is always in the DOM (even hidden), so read/write is safe regardless of margin state.
+function stashDrafts() {
+  if (!STATE.room) return;
+  STATE.drafts[STATE.room.id] = $("#input").value;
+  STATE.marginDrafts[STATE.room.id] = $("#margin-input").value;
+}
+function restoreDrafts() {
+  const id = STATE.room && STATE.room.id;
+  $("#input").value = (id && STATE.drafts[id]) || "";
+  $("#margin-input").value = (id && STATE.marginDrafts[id]) || "";
+}
+
 async function switchRoom(id) {
+  if (STATE.room && STATE.room.id === id) { focusComposer(); return; }   // already here — no-op re-adopt
   banner(null); setStatus("");   // a background round's status must not bleed across rooms
+  stashDrafts();                 // save the room we're leaving BEFORE adopt swaps STATE.room (Phase 31.2)
   STATE.staged = []; renderStagedFiles();   // staged files belong to the room you left
   try {
     const view = await api(`/rooms/${id}/activate`, "POST");   // sets active + marks read
     adoptRoom(view);
-    await refreshRooms();
+    restoreDrafts();             // load the room we arrived in — SYNCHRONOUS with adopt so the
+    focusComposer();             // composer is settled before the title is observable (Phase 31.1/31.2)
+    await refreshRooms();        // sidebar refresh is independent — after the composer is settled
   } catch (e) { banner(e.message); }
 }
 
 async function newRoom() {
   const title = prompt("room title:");
   if (!title) return;
+  stashDrafts();                 // preserve the room we're leaving (Phase 31.2)
   try {
     const data = await api("/rooms", "POST", { title });   // EMPTY room — forced decision
     adoptRoom(data.room);
-    await refreshRooms();
+    restoreDrafts();             // a fresh room starts with an empty composer — synchronous with adopt (Phase 31.2)
+    focusComposer();             // caret ready in the new room (Phase 31.1)
     banner("New room — choose its models and judge in “models” (top-right) before researching.");
+    await refreshRooms();        // sidebar refresh is independent
   } catch (e) { banner(e.message); }
 }
 
@@ -1129,7 +1215,10 @@ async function send() {
   // would defeat multi-room concurrency.
   try {
     // 1. flush staged files first — file-turns precede the message turn, so the
-    //    panel reads "here's the document, now my question".
+    //    panel reads "here's the document, now my question". NOTE (Phase 31.3): this is
+    //    NOT atomic with the /run below — files commit as turns before the round, so a
+    //    failed /run leaves the file-turns in place and preserves only the typed text
+    //    (optimistic render covers the text only). Atomic send is deferred (DEFERRED.md).
     if (hasFiles) {
       const files = STATE.staged.map((f) => ({ filename: f.filename, content: f.content }));
       setStatus(`attaching ${files.length} file${files.length === 1 ? "" : "s"}…`, true);
@@ -1147,8 +1236,11 @@ async function send() {
     }
     // 2. the message turn (+ its model round) — one unified dispatch endpoint
     setStatus(modeStatus(sel), true);
+    STATE.pending = { text, ts: Date.now() };   // optimistic user bubble, painted this frame (Phase 31.3)
+    render();
     const data = await api(`/rooms/${roomId}/run`, "POST", sel);
     input.value = "";
+    delete STATE.drafts[roomId];                 // sent successfully → no draft to restore (Phase 31.2)
     // Concurrency: render the result ONLY if its room is still on screen. If the
     // user switched away while it ran, leave the active view alone and let the
     // sidebar dot surface the background completion.
@@ -1161,6 +1253,7 @@ async function send() {
     // send and the user hasn't moved on to another room's activity.
     if (STATE.room && STATE.room.id === data.room_id) setStatus("");
   } catch (e) {
+    STATE.pending = null; render();              // drop the optimistic bubble; #input keeps the draft (Phase 31.3/31.2)
     setStatus(""); banner(`${mode} failed: ${e.message}`);
   }
 }
@@ -1187,6 +1280,14 @@ function openRoomSettings() {
   }
   fillRoomJudge();
   $("#room-tags").value = (STATE.room.tags || []).join(", ");
+  // per-room artifacts dir (Phase 32.1): the room's own value; placeholder shows the
+  // resolved GLOBAL so a blank field visibly means "inherit the global".
+  const artIn = $("#room-artifacts-dir");
+  if (artIn) {
+    artIn.value = STATE.room.artifacts_dir || "";
+    const g = (STATE.ui.artifacts_dir || "").trim();
+    artIn.placeholder = g ? `blank = inherit global (${g})` : "blank = inherit global (none set)";
+  }
   $("#room-settings-overlay").classList.remove("hidden");
 }
 function checkedRoster() {
@@ -1204,9 +1305,12 @@ async function saveRoomSettings() {
   const participants = checkedRoster();
   const judge = $("#room-judge").value || null;
   const tags = $("#room-tags").value.split(",").map((s) => s.trim()).filter(Boolean);
+  const artIn = $("#room-artifacts-dir");
+  const artifacts_dir = artIn ? artIn.value.trim() : "";   // "" = inherit global (Phase 32.1)
   try {
-    await api(`/rooms/${STATE.room.id}`, "PUT", { participants, judge, tags });
+    await api(`/rooms/${STATE.room.id}`, "PUT", { participants, judge, tags, artifacts_dir });
     STATE.room.participants = participants; STATE.room.judge = judge; STATE.room.tags = tags;
+    STATE.room.artifacts_dir = artifacts_dir;
     renderComposerPickers(); render();
     $("#room-settings-overlay").classList.add("hidden");
     banner(null);
@@ -1267,6 +1371,7 @@ function closeMargin() {
   STATE.marginOpen = false;
   $("#margin").classList.add("hidden");
   $("#margin-splitter").classList.add("hidden");
+  focusComposer();               // return the caret to the main composer (Phase 31.1)
 }
 
 async function marginSend() {
@@ -1281,6 +1386,7 @@ async function marginSend() {
   try {
     const data = await api(`/rooms/${roomId}/margin`, "POST", { prompt: text, window: window_, model });
     input.value = "";
+    delete STATE.marginDrafts[roomId];      // sent → no margin draft to restore (Phase 31.2)
     // Concurrency: only paint into the margin if we're still in that room.
     if (STATE.room && STATE.room.id === data.room_id) {
       STATE.marginTurns = data.margin_turns || [];
@@ -1725,6 +1831,99 @@ $("#add-btn").addEventListener("click", async () => {
   } catch (e) { banner(e.message); }
 });
 
+// ===== Ctrl/Cmd+K room switcher palette (Phase 31.4) =========================
+// Keyboard-first jump-to-room. No new endpoint: STATE.rooms already carries title,
+// tags, participants and last_ts (recon §5). Reuses the .overlay/.overlay-card skeleton
+// and the showPreview rendering vocabulary (participant dots + a relative date).
+let _paletteSel = 0, _paletteRooms = [];
+function paletteOpen() { const o = $("#palette-overlay"); return !!o && !o.classList.contains("hidden"); }
+
+function paletteMatches(q) {
+  const rooms = [...STATE.rooms];                                          // copy: never mutate STATE.rooms
+  if (!q) return rooms.sort((a, b) => (b.last_ts || "").localeCompare(a.last_ts || ""));   // recent first
+  const needle = q.toLowerCase();
+  return rooms.filter((r) =>                                               // title primary, tags + participants secondary
+    [r.title || "", ...(r.tags || []), ...(r.participants || [])].join(" ").toLowerCase().includes(needle));
+}
+function filterPalette() {
+  _paletteRooms = paletteMatches($("#palette-input").value.trim());
+  if (_paletteSel >= _paletteRooms.length) _paletteSel = Math.max(0, _paletteRooms.length - 1);
+  renderPalette();
+}
+function renderPalette() {
+  const list = $("#palette-list"); list.innerHTML = "";
+  if (!_paletteRooms.length) {
+    const e = el("div", "palette-empty"); e.textContent = STATE.rooms.length ? "no rooms match" : "no rooms yet";
+    list.append(e); return;
+  }
+  _paletteRooms.forEach((r, i) => {
+    const row = el("div", "palette-row" + (i === _paletteSel ? " sel" : ""));
+    const t = el("span", "palette-title"); t.textContent = r.title || r.id; row.append(t);
+    const dots = el("span", "palette-dots");
+    (r.participants || []).forEach((k) => { const p = providerOf(k); dots.append(dot(p ? p.color : DOT_DEFAULT)); });
+    row.append(dots);
+    const when = el("span", "palette-when"); when.textContent = fmtDate(r.last_ts); row.append(when);
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); choosePalette(i); });   // fire before backdrop/blur
+    row.addEventListener("mouseenter", () => { if (_paletteSel !== i) { _paletteSel = i; renderPalette(); } });
+    list.append(row);
+  });
+}
+function movePalette(d) {
+  if (!_paletteRooms.length) return;
+  _paletteSel = (_paletteSel + d + _paletteRooms.length) % _paletteRooms.length;
+  renderPalette();
+  const sel = $("#palette-list .palette-row.sel"); if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+function choosePalette(i) {
+  const r = _paletteRooms[i]; if (!r) return;
+  closePalette();
+  if (!STATE.room || r.id !== STATE.room.id) switchRoom(r.id);   // switchRoom → adopt → focusComposer (31.1)
+  else focusComposer();                                         // already here → just land the caret
+}
+function openPalette() {
+  if (paletteOpen()) return;
+  const inp = $("#palette-input"); inp.value = ""; _paletteSel = 0;
+  $("#palette-overlay").classList.remove("hidden");
+  filterPalette();
+  inp.focus({ preventScroll: true });
+}
+function closePalette() { $("#palette-overlay").classList.add("hidden"); }
+
+// One dismissal grammar for EVERY overlay (Phase 31.4): click the backdrop (outside the
+// card) or press Esc → close. Introduced with the palette and retrofitted to the two
+// existing overlays so the app has one convention, not three. (Full ARIA focus-trap is
+// out of scope for a local single-user app — autofocus + Esc is the bar.)
+const _overlays = [];
+function wireOverlayDismiss(overlaySel, onClose) {
+  const ov = $(overlaySel); if (!ov) return;
+  ov.addEventListener("mousedown", (e) => { if (e.target === ov) onClose(); });   // backdrop only, not the card
+  _overlays.push({ ov, close: onClose });
+}
+function closeAnyOverlay() {   // Esc closes the open overlay (only one is open in practice)
+  for (const o of _overlays) if (!o.ov.classList.contains("hidden")) { o.close(); return true; }
+  return false;
+}
+wireOverlayDismiss("#palette-overlay", closePalette);
+wireOverlayDismiss("#room-settings-overlay", () => $("#room-settings-overlay").classList.add("hidden"));
+wireOverlayDismiss("#providers-overlay", () => $("#providers-overlay").classList.add("hidden"));
+
+$("#palette-input").addEventListener("input", () => { _paletteSel = 0; filterPalette(); });
+
+// The app's FIRST document-level key binding (recon §4 confirmed no collision). Ctrl/Cmd+K
+// toggles the switcher from anywhere (incl. while the composer has focus); Esc closes any
+// open overlay; arrows/Enter drive the palette ONLY while it's open — so Enter-to-send is
+// untouched when it's closed.
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K") && !e.isComposing) {
+    e.preventDefault(); paletteOpen() ? closePalette() : openPalette(); return;
+  }
+  if (e.key === "Escape") { if (closeAnyOverlay()) e.preventDefault(); return; }
+  if (!paletteOpen()) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); movePalette(-1); }
+  else if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); choosePalette(_paletteSel); }
+});
+
 // ===== boot ==================================================================
 (async function boot() {
   syncModeUI();
@@ -1752,5 +1951,6 @@ $("#add-btn").addEventListener("click", async () => {
     } else {
       renderComposerPickers(); render();
     }
+    focusComposer();               // land the caret in the composer on load (Phase 31.1)
   } catch (e) { banner(`could not reach engine: ${e.message}`); }
 })();

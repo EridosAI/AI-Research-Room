@@ -180,9 +180,14 @@ Two layers, cleanly split:
   grey ramp, mode-aware), **font size** (a `--font-scale` multiplier), a **display name** the app
   (and the models, via context) address you by, and **token-chip toggles** (token estimate / model
   %). All persist to `ui.json` and survive reload.
-- **Markdown artifacts.** When a model emits a fenced ` ```markdown ` block, the answer shows
-  **copy** (raw `.md` → clipboard) and **save** (→ a configured artifacts folder, collision-safe
-  name); auto-written on detection when the folder is set. Markdown only — no execution, one rule.
+- **Markdown artifacts (per-room).** When a model emits a fenced ` ```markdown ` block, the answer
+  shows **copy** (raw `.md` → clipboard) and **save** (→ an artifacts folder, collision-safe name);
+  auto-written on detection when a folder resolves. The folder is **per-room** — set an "artifacts
+  dir" in room settings and that room's specs land there (blank inherits the global Settings → Data
+  folder), so a room pinned to a project folder writes where Claude Code reads. Every seat in the
+  room (panel, judge, converse — via a system-prompt line) is told the path, an auto-saved block
+  stamps the saved path on the turn, and the chip shows the **filename + a "copy path"** button for
+  the hand-off. Markdown only — no execution, one rule.
 - **Room hover preview.** Hovering a room in the sidebar shows its models, start/last dates, and a
   truncated summary — instantly, from `room.json`/the JSONL, no model call.
 - **Multi-room concurrency.** Each room has its own lock, so a slow research round in one
@@ -287,7 +292,14 @@ A single static page (vanilla HTML/JS, `marked` + `DOMPurify` from CDN, no build
   per-round model picker + judge selector (research);
 - a **models** control per room to choose its participants and judge;
 - the **margin** — a resizable side-panel with its own model, a window selector
-  (`last turn` / `last 3 turns` / `full transcript`), and a "copy to main" on each answer.
+  (`last turn` / `last 3 turns` / `full transcript`), and a "copy to main" on each answer;
+- **composer niceties** — the caret lands in the composer on load, room switch and new-room
+  (just type); each room keeps its own **draft**, so typed-but-unsent text no longer bleeds
+  between rooms (session-only — not saved across a restart); your message appears the instant
+  you send it (optimistic), and is left in the composer if the send fails;
+- a **⌘K / Ctrl-K room switcher** — a keyboard-first palette: type to fuzzy-filter by room
+  title / tag / participant, ↑↓ to move, Enter to jump (the caret lands back in the composer),
+  Esc or a backdrop click to dismiss — the same Esc/backdrop grammar now closes every overlay.
 
 ### CLI
 
@@ -408,6 +420,9 @@ python tests/engine_phase29.py         # prompt caching: prefix split + cache_co
 python tests/browser_phase29.py        # cached-token row in the turn popover
 python tests/engine_phase30.py         # absent-panelist reasons stamped on the judge turn (not leaked)
 python tests/browser_phase30.py        # round-in-progress signal (in-room + sidebar) + absent rendering
+python tests/browser_phase31.py        # composer focus + per-room drafts + optimistic send + ⌘K/Ctrl-K switcher
+python tests/engine_phase32.py         # per-room artifacts: dir resolution + guard across seats + meta stamp/isolation
+python tests/browser_phase32.py        # artifacts-dir overlay round-trip + saved chip (filename + copy-path)
 ```
 
 ## Environment

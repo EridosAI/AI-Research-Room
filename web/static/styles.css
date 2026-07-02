@@ -224,8 +224,12 @@ input, textarea { color: var(--text-primary); }
 .artifact { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
   background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm); }
-.artifact-label { font-size: var(--text-xs); color: var(--text-secondary); margin-right: auto; }
+.artifact-label { font-size: var(--text-xs); color: var(--text-secondary); margin-right: auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-btn { font-size: 11.5px; padding: 2px 9px; }
+/* auto-saved (Phase 32.4): the chip names the saved file — a subtle accent edge + mono label */
+.artifact.saved { border-color: var(--accent-border); }
+.artifact.saved .artifact-label { color: var(--text-primary); font-family: var(--font-mono); }
 
 /* per-turn footer — small muted row of pills (thinking toggle + model pill) under
    the body; the reasoning body renders full-width BELOW this row, not inside it */
@@ -504,3 +508,23 @@ input, textarea { color: var(--text-primary); }
   border: 2px solid transparent; background-clip: padding-box; }   /* ~8px visual, 12px grab */
 .stream::-webkit-scrollbar-thumb:hover, .margin-stream::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover); background-clip: padding-box; }
+
+/* optimistic user turn (Phase 31.3) — dimmed, with a small "sending…" affordance
+   below the bubble; the spinner reuses the .status idiom. Cleared when the server turn lands. */
+.turn.pending { opacity: .6; }
+.turn.pending .pending-foot { display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+  font-size: var(--text-xs); color: var(--text-tertiary); margin-top: 6px; }
+
+/* Ctrl/Cmd+K room switcher palette (Phase 31.4) — reuses .overlay/.overlay-card */
+.palette-card { width: min(560px, 100%); padding: 12px; }
+#palette-input { width: 100%; font-size: var(--text-md); padding: 10px 12px; margin-bottom: 8px; }
+.palette-list { max-height: 50vh; overflow-y: auto; }
+.palette-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-radius: var(--radius-md); cursor: pointer; }
+.palette-row.sel { background: var(--surface-active); }
+.palette-row .palette-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-primary); }
+.palette-row .palette-dots { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.palette-row .palette-when { font-size: 11px; color: var(--text-quaternary); flex: 0 0 auto;
+  font-family: var(--font-mono); }
+.palette-empty { padding: 12px 10px; color: var(--text-tertiary); font-size: var(--text-sm); }

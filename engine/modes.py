@@ -26,7 +26,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from . import providers, rooms, settings, transcript
+from . import artifacts, providers, rooms, settings, transcript
 from .context import build_context
 
 # Panelists answer the task straight, blind to each other.
@@ -188,13 +188,15 @@ def _attached_docs(turns: list[dict]) -> list[str]:
 
 # ---- shared primitives (extracted, not rewritten) --------------------------
 def _panelist(speaker: str, payload: dict, effort: str, reasoning_effort: str | None = None,
-              *, tools: bool = True, max_tokens: int | None = None, cache: bool = False):
+              *, tools: bool = True, max_tokens: int | None = None, cache: bool = False,
+              artifacts_dir: str | None = None):
     """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
     a failure becomes an absence, captured for the judge prompt."""
     try:
         reply = providers.call_model(speaker, payload, tools=tools, effort=effort,
                                      max_tokens=(max_tokens or settings.RESEARCH_MAX_TOKENS),
-                                     reasoning_effort=reasoning_effort, cache=cache)
+                                     reasoning_effort=reasoning_effort, cache=cache,
+                                     artifacts_dir=artifacts_dir)
         if not reply.text.strip():
             return speaker, None, "empty answer"
         return speaker, reply, None
@@ -269,15 +271,35 @@ def _build_judge_prompt(task: str, answers: list[tuple[str, str]],
     return "\n".join(parts)
 
 
-def _call_judge(judge: str, payload: dict, effort: str, reasoning_effort: str | None = None):
+def _stamp_artifacts(meta: dict, room_id: str, text: str, artifacts_dir: str | None) -> None:
+    """Best-effort: auto-write any ```markdown blocks in a FORWARD turn (converse / yes-and
+    reply or judge synthesis) and stamp the saved paths on the turn meta as `artifact_paths`
+    — so the write is VISIBLE in the transcript (Phase 32.3); before, the paths were
+    discarded. Raw panel answers do NOT auto-save (parity with the pre-32 _maybe_artifacts
+    sites). Never raises: an artifact failure stamps nothing and must never fail the turn or
+    its append. meta.* never enters build_context, so the forward-context invariant holds.
+    NOTE: save_artifact's filename collision handling (artifacts.py) is count-based —
+    single-writer-safe under the per-room lock; revisit if artifact writes ever parallelize."""
+    if not artifacts_dir:
+        return
+    try:
+        paths = artifacts.auto_write(room_id, text, artifacts_dir)
+        if paths:
+            meta["artifact_paths"] = [str(p) for p in paths]
+    except Exception:  # noqa: BLE001 — artifacts are a side-effect, never load-bearing
+        pass
+
+
+def _call_judge(judge: str, payload: dict, effort: str, reasoning_effort: str | None = None,
+                artifacts_dir: str | None = None):
     try:
         return providers.call_model(judge, payload, tools=True, effort=effort,
                                     max_tokens=settings.RESEARCH_MAX_TOKENS,
-                                    reasoning_effort=reasoning_effort)
+                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir)
     except providers.RunnerUnavailable:
         return providers.call_model(judge, payload, tools=False,
                                     max_tokens=settings.RESEARCH_MAX_TOKENS,
-                                    reasoning_effort=reasoning_effort)
+                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir)
 
 
 # ---- the executor -----------------------------------------------------------
@@ -320,6 +342,10 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
     path = rooms.main_path(room_id)
     efforts = room.get("reasoning_effort") or {}
     round_id = str(uuid.uuid4())
+    # per-room artifacts dir (room override → global fallback), resolved ONCE: it both
+    # feeds the awareness line into every seat's system prompt (32.2) and is the write
+    # target for the meta stamp (32.3), so the two can never disagree.
+    art_dir = artifacts.resolve_artifacts_dir(room_id)
 
     # attached documents (Phase 22) for blind rounds — read before the human turn
     docs = _attached_docs(transcript.load(path))
@@ -362,17 +388,18 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                 meta["absent"] = [{"speaker": s, "error": e} for s, e in absent]   # reached the judge prompt)
             judge_used = judge
             try:
-                reply = _call_judge(judge, jpayload, effort, efforts.get(judge))
+                reply = _call_judge(judge, jpayload, effort, efforts.get(judge), artifacts_dir=art_dir)
             except Exception:  # noqa: BLE001 — judge down → fall back to a seat that answered
                 fallbacks = [s for s, _ in prior if s != judge]
                 if not fallbacks:
                     raise
                 judge_used = fallbacks[0]
-                reply = _call_judge(judge_used, jpayload, effort, efforts.get(judge_used))
+                reply = _call_judge(judge_used, jpayload, effort, efforts.get(judge_used), artifacts_dir=art_dir)
                 meta["judge_fallback_from"] = judge
             meta["model"] = providers.provider(judge_used).model
             meta["reasoning_effort"] = _effort_label(judge_used, efforts.get(judge_used))
             meta.update(_reply_meta(reply))
+            _stamp_artifacts(meta, room_id, reply.text, art_dir)   # write + stamp before append (32.3)
             transcript.append(transcript.make_turn(mode.turn_mode, "judge", judge_used, reply.text, meta), path)
             last = reply.text
             continue
@@ -390,14 +417,15 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
             with ThreadPoolExecutor(max_workers=max(1, len(speakers))) as ex:
                 results = list(ex.map(
                     lambda s: _panelist(s, _round_payload(rnd, s, prompt, doc_block, path, room, human_label, eff_ctx),
-                                        effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens, cache=cache_this),
+                                        effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens,
+                                        cache=cache_this, artifacts_dir=art_dir),
                     speakers))
         else:   # non-degrading single seat (converse): a failure propagates, as before
             s0 = speakers[0]
             reply0 = providers.call_model(
                 s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label, eff_ctx),
                 tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0),
-                cache=cache_this)
+                cache=cache_this, artifacts_dir=art_dir)
             results = [(s0, reply0, None)]
 
         prior, absent = [], []
@@ -413,6 +441,8 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
             if rnd.role == "ai-raw":
                 meta["is_panelist_raw"] = True
                 meta["tools"] = (p.auth_mode == "cli")      # only cli actually searched
+            else:
+                _stamp_artifacts(meta, room_id, reply.text, art_dir)   # forward replies auto-save (converse/yes-and)
             transcript.append(transcript.make_turn(mode.turn_mode, "ai", speaker, reply.text, meta), path)
             prior.append((speaker, reply.text))             # judge sees text only — never reasoning
             last = reply.text

@@ -62,6 +62,11 @@
           <label>tags</label>
           <input id="room-tags" type="text" placeholder="comma, separated  (→ .md frontmatter)" />
         </div>
+        <div class="judge-row">
+          <label>artifacts dir</label>
+          <input id="room-artifacts-dir" type="text" placeholder="blank = inherit global" />
+          <span class="hint">this room's ```markdown blocks save here (blank inherits Settings → Data)</span>
+        </div>
         <div class="pcard-actions"><span class="right"><button id="room-settings-save">save</button></span></div>
       </div>
     </div>
@@ -144,6 +149,16 @@
           </div>
           <div id="artifacts-current" class="export-current"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- Ctrl/Cmd+K room switcher (Phase 31.4) — keyboard-first jump-to-room. Reuses the
+         .overlay/.overlay-card skeleton; dismisses on Esc / backdrop like the two above. -->
+    <div id="palette-overlay" class="overlay hidden">
+      <div class="overlay-card palette-card">
+        <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Jump to a room…  (type to filter · ↑↓ move · Enter open · Esc close)" />
+        <div id="palette-list" class="palette-list"></div>
       </div>
     </div>
 

@@ -49,6 +49,18 @@ difference. Current architecture is in [README.md](README.md); the build record 
 - **Auto-suggested room tags** (Phase 12). The Obsidian export writes per-room `tags` into the
   `.md` frontmatter, but you set them by hand in room settings. Auto-suggesting tags from the
   transcript via a cheap model is a nice-to-have left out for now.
+- **Cross-restart composer drafts** (Phase 31). Per-room drafts are session-only, in-memory
+  (`STATE.drafts` / `STATE.marginDrafts`) — they survive room switches but NOT a page reload or
+  server restart, on purpose: `ui.json` is a global scalar store and message text doesn't belong
+  in a config file. Persisting them wants **per-room** keying (a `draft` field written into the
+  room-folder meta on switch/blur), not a `ui.json` key — deferred until "lost my draft on reload"
+  is a felt need.
+- **Atomic text+file send** (Phase 31). A send carrying both staged files and a message flushes the
+  files as committed file-turns *before* the `/run` call, so the two aren't one transaction: if
+  `/run` fails, the file-turns remain and only the typed text is preserved (optimistic render covers
+  the text only). Making it atomic — commit the file-turns + message + round together, or roll the
+  file-turns back on a failed `/run` — is deferred; the current behaviour is flagged in a `send()`
+  comment.
 - **Light mode — SHIPPED (Phase 15).** Built as a `[data-theme="light"]` CSS surface block +
   mode-aware JS ramps (`applyAccent`/`applyBrightness` fork on `currentTheme`) repainted through a
   single `applyThemeMode()`, behind a dark / light / **system** (`prefers-color-scheme`, live OS
@@ -186,6 +198,23 @@ compaction itself: summarise/evict one seat's slice of forward context, swap in 
 ring — without disturbing the other seats' context. Until then the numerator is shared across rings
 (they differ only by window); post-compaction each ring reflects its own context. See
 [BUILD_amendment_phase23.md](BUILD_amendment_phase23.md).
+
+## Deferred from Phase 32 (per-room artifacts)
+
+- **Persona system-slot hygiene — ONE decision covering BOTH guards.** Two guard-style lines now fold
+  into a seat's system prompt inside `call_model`: the no-search guard (Phase 23) and the artifacts-
+  awareness line (Phase 32.2). When personas become real, persona-bearing speakers get a persona
+  "bible" in that same system slot — so how the guards compose with it (apply before / strip / append
+  after the bible) is a SINGLE call owned by the persona amendment, made once for BOTH guards rather
+  than per-guard. Guard-layer injection already reaches every seat (incl. future persona ones), so
+  nothing is special-cased now. This supersedes the earlier "personas are excluded for free via
+  `room_system` replacement" reasoning — `room_system` was never the injection point (it skips the
+  judge + blind panelists); `call_model` is, which is exactly why the artifacts line lives there.
+- **Atomic / parallel-safe artifact naming.** `save_artifact` names `<slug>-<room_id>-<n>.md` with
+  `n = (count of existing matches) + 1` — single-writer-safe under the per-room lock, but two
+  concurrent writers could collide on `n`. Fine today (one round per room at a time, and only FORWARD
+  turns auto-save — raw panels deliberately do NOT). Revisit with a real atomic allocation (O_EXCL
+  create-and-retry, or a per-room counter in `room.json`) if artifact writes ever parallelize.
 
 ## Next up (not deferred, just not started)
 
