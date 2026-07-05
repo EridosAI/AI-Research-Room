@@ -330,7 +330,7 @@ def _round_payload(rnd: Round, speaker: str, prompt: str, doc_block: str,
 
 
 def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
-             *, effort: str = "medium", human_label: str = "human") -> str:
+             *, effort: str = "medium", human_label: str = "human", on_delta=None) -> str:
     """Execute a mode (ordered rounds + gate) over a room. The single path under every
     interaction pattern — degradation, both judge fallbacks, meta-isolation, and the
     ai-raw forward-context exclusion all live here, exercised by the wrappers + new modes.
@@ -422,10 +422,14 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                     speakers))
         else:   # non-degrading single seat (converse): a failure propagates, as before
             s0 = speakers[0]
+            # stream ONLY the true converse fast path (Phase 36) — NOT yes-and, whose
+            # turn_mode is also "converse" (gate on mode.name). Panel/judge branches above
+            # never see on_delta at all.
             reply0 = providers.call_model(
                 s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label, eff_ctx),
                 tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0),
-                cache=cache_this, artifacts_dir=art_dir)
+                cache=cache_this, artifacts_dir=art_dir,
+                on_delta=(on_delta if mode.name == "converse" else None))
             results = [(s0, reply0, None)]
 
         prior, absent = [], []
@@ -470,9 +474,11 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
 
 
 def converse(room_id: str, prompt: str, addressed_to: str | None = None,
-             human_label: str = "human") -> str:
+             human_label: str = "human", on_delta=None) -> str:
     """One model answers, seeing the room's synthesis-only forward context (raw panel
-    answers never flow forward)."""
+    answers never flow forward). `on_delta`, when given, streams the reply (Phase 36):
+    on_delta(chunk) per token-ish delta; the appended turn is unchanged (full text+meta,
+    once, post-stream)."""
     room = rooms.load_room(room_id)
     path = rooms.main_path(room_id)
     if not addressed_to:
@@ -480,7 +486,8 @@ def converse(room_id: str, prompt: str, addressed_to: str | None = None,
                         or (room["participants"] or providers.enabled()
                             or providers.provider_keys())[0])
     providers.provider(addressed_to)   # validate; raises ValueError if unknown
-    return run_mode(room_id, CONVERSE_MODE, prompt, {"target": addressed_to}, human_label=human_label)
+    return run_mode(room_id, CONVERSE_MODE, prompt, {"target": addressed_to},
+                    human_label=human_label, on_delta=on_delta)
 
 
 def side_by_side(room_id: str, prompt: str, seats: list[str],

@@ -269,6 +269,30 @@ WSL distro so systemd starts it. One dependency is deliberately **documented, no
 - **Recency/token-refresh generalised.** Same shape would cover any future subscription-CLI
   seat run as a sidecar. Not built; the proxy is the only such seat today.
 
+## Deferred from Phase 36 (converse streaming)
+
+Converse streams over SSE (`POST /rooms/{id}/run/stream`); panel/judge modes stay synchronous.
+Three deliberate "not yet"s:
+
+- **Append-the-partial on cancel.** Stop / disconnect **discards** the partial — no ai turn is
+  appended, identical to a failed converse (answerless human turn). Keeping the partial (append what
+  streamed so far, marked incomplete) needs a **finish flag** on the turn (`meta.finish_reason =
+  "aborted"` or similar) + a UI affordance to resume/retry, and a policy for the half-formed text
+  (is it forward context?). Deferred until "I stopped it but wanted to keep what it had" is felt. The
+  seam is ready: `_StreamAborted` currently unwinds before the append; append-then-mark would branch
+  there instead.
+- **Reasoning-delta display.** Reasoning deltas (OR `delta.reasoning`, Anthropic `thinking_delta`) are
+  **accumulated** into the turn's reasoning slot as today, but NOT streamed to the UI as text — only
+  the answer streams live; the thinking appears in its collapsed disclosure once the turn lands.
+  Live-streaming the thinking trace (a second growing region above the answer) is additive on the same
+  `on_delta` channel — it would need a typed delta (`{kind: "text"|"reasoning", chunk}`) so the client
+  routes each to the right region.
+- **Streaming the judge synthesis.** The next-most-watched single stream: a fusion round's judge turn
+  is one seat producing one forward answer, so it *could* stream like converse while the blind panel
+  stays synchronous (panelists run in parallel — nothing to stream coherently). Deferred because it
+  means threading `on_delta` into the judge round of `run_mode` + a second streaming route shape (the
+  panel completes non-streamed, THEN the judge streams), not the clean single-call converse path.
+
 ## Next up (not deferred, just not started)
 
 - **Packaging / installable.** The whole point of settling the surface first: package this

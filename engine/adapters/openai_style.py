@@ -8,6 +8,8 @@ Response text at choices[0].message.content.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from .. import settings
@@ -95,9 +97,79 @@ def _cache_messages(msgs: list[dict], ttl: str | None) -> list[dict]:
     return out
 
 
+def _build_usage(u: dict | None) -> dict | None:
+    """Shape a chat-completions usage block into our {input, output, [cost], [reasoning],
+    [cached]} dict (None when absent). Shared by the streaming + non-streaming paths."""
+    if not u:
+        return None
+    usage = {"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
+    if u.get("cost") is not None:                  # OpenRouter's authoritative USD cost
+        usage["cost"] = u["cost"]
+    ctd = u.get("completion_tokens_details") or {}
+    if ctd.get("reasoning_tokens") is not None:    # how much the model ACTUALLY thought
+        usage["reasoning"] = ctd["reasoning_tokens"]
+    ptd = u.get("prompt_tokens_details") or {}
+    if ptd.get("cached_tokens") is not None:       # prompt-cache hit size
+        usage["cached"] = ptd["cached_tokens"]
+    return usage
+
+
+def _stream_chat(url: str, hdr: dict, body: dict, on_delta, reasoning: bool, key: str | None):
+    """Stream chat/completions, calling on_delta(text_chunk) per content delta. Returns
+    (text, reasoning_or_None, raw_usage_or_None, served_model, finish). Reasoning deltas
+    (OR `delta.reasoning`, direct `reasoning_content`) accumulate into the reasoning slot
+    but are NOT forwarded as text (display-streaming of reasoning is deferred). Usage rides
+    the final data event (request stream_options.include_usage). Raises httpx errors to the
+    caller, which maps them to a RuntimeError (and handles the cache-400 retry). A MID-STREAM
+    `{"error": …}` event (200 then an error, e.g. provider overload) raises RuntimeError too —
+    a streamed failure must NOT be returned as a truncated 'success' (no ai turn appended)."""
+    body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+    parts: list[str] = []
+    rparts: list[str] = []
+    served = finish = None
+    u: dict = {}
+    with httpx.stream("POST", url, headers=hdr, json=body, timeout=TIMEOUT) as r:
+        if r.status_code >= 400:
+            r.read()                               # a streamed error body isn't read yet
+            r.raise_for_status()
+        for line in r.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()            # tolerate "data:" and "data: "
+            if data_str == "[DONE]":
+                break
+            try:
+                data = json.loads(data_str)
+            except ValueError:
+                continue
+            if isinstance(data, dict) and data.get("error"):     # mid-stream provider error (200 then error)
+                err = data["error"]
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise RuntimeError(redact(f"stream error: {msg or 'provider error'}", key))
+            if data.get("model"):
+                served = data["model"]
+            if data.get("usage"):
+                u = data["usage"]
+            for ch in data.get("choices") or []:
+                delta = ch.get("delta") or {}
+                txt = delta.get("content")
+                if txt:
+                    parts.append(txt)
+                    on_delta(txt)                  # display channel (may raise to abort)
+                if reasoning:
+                    rd = delta.get("reasoning") or delta.get("reasoning_content")
+                    if rd:
+                        rparts.append(rd)
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+    text = "".join(parts).strip()
+    rc = ("".join(rparts).strip() or None) if reasoning else None
+    return text, rc, (u or None), served, finish
+
+
 def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None,
          reasoning: bool = False, web_search: bool = False, reasoning_effort: str | None = None,
-         cache: bool = False
+         cache: bool = False, on_delta=None
          ) -> tuple[str, str | None, dict | None, str | None, dict | None, str | None]:
     """Returns (answer_text, reasoning_or_None, usage_or_None, served_model_or_None,
     search_or_None, finish_reason_or_None). When `reasoning` is on: OpenRouter rows get the
@@ -106,7 +178,9 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
     DeepSeek `thinking`/`reasoning_effort` switch. Reasoning is captured from
     reasoning_details/reasoning/reasoning_content (see _extract_reasoning). When
     `web_search` is on AND OpenRouter, attach the server-side search tool + normalize
-    citations. usage = exact token counts if provided; served_model = response `model`."""
+    citations. usage = exact token counts if provided; served_model = response `model`.
+    When `on_delta` is given the response is STREAMED (on_delta(chunk) per content delta);
+    the same 6-tuple is returned at the end. on_delta=None ⇒ the original one-shot path."""
     if not key:
         raise RuntimeError(f"no API key configured for '{provider.key}'")
     url = f"{provider.base_url}/chat/completions"
@@ -138,6 +212,24 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
     if use_cache:
         body["messages"] = _cache_messages(body["messages"], settings.PROMPT_CACHE_TTL)
     hdr = {"Authorization": f"Bearer {key}"}
+    # Streaming path (converse fast path): on_delta(chunk) per content delta. Same 6-tuple
+    # at the end; caching's 400-fallback is preserved (a 400 lands at stream-open, before any
+    # delta, so a plain re-stream is safe). converse never searches → search stays None.
+    if on_delta is not None:
+        try:
+            text, rc, uraw, served, finish = _stream_chat(url, hdr, body, on_delta, reasoning, key)
+        except httpx.HTTPStatusError as e:
+            if use_cache and e.response.status_code == 400:
+                body["messages"] = _messages(payload)
+                try:
+                    text, rc, uraw, served, finish = _stream_chat(url, hdr, body, on_delta, reasoning, key)
+                except httpx.HTTPError as e2:
+                    raise RuntimeError(redact(f"request failed: {e2}", key)) from None
+            else:
+                raise RuntimeError(redact(f"HTTP {e.response.status_code}: {e.response.text[:400]}", key)) from None
+        except httpx.HTTPError as e:
+            raise RuntimeError(redact(f"request failed: {e}", key)) from None
+        return text, rc, _build_usage(uraw), served, None, finish
     try:
         r = httpx.post(url, headers=hdr, json=body, timeout=TIMEOUT)
         r.raise_for_status()
@@ -162,22 +254,7 @@ def chat(provider, key: str | None, payload: dict, max_tokens: int | None = None
     text = (msg.get("content") or "").strip()
     finish = choice.get("finish_reason") or None   # openai vocab: stop | length | tool_calls | content_filter
     rc = _extract_reasoning(msg) if reasoning else None
-    u = data.get("usage") or {}
-    usage = None
-    if u:
-        usage = {"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
-        if u.get("cost") is not None:                  # OpenRouter's authoritative USD cost
-            usage["cost"] = u["cost"]
-        # how much the model ACTUALLY thought — the real signal vs the requested effort
-        # (counted within completion_tokens). 0/absent ⇒ it didn't reason this turn.
-        ctd = u.get("completion_tokens_details") or {}
-        if ctd.get("reasoning_tokens") is not None:
-            usage["reasoning"] = ctd["reasoning_tokens"]
-        # prompt-cache hit: how many input tokens were served from cache (~10% cost) —
-        # the visible proof the stable transcript prefix didn't re-prefill.
-        ptd = u.get("prompt_tokens_details") or {}
-        if ptd.get("cached_tokens") is not None:
-            usage["cached"] = ptd["cached_tokens"]
+    usage = _build_usage(data.get("usage"))
     search = (_openrouter_search(data) if web_search and _is_openrouter(provider) else None)
     return text, rc, usage, (data.get("model") or None), search, finish
 

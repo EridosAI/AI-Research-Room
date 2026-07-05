@@ -164,6 +164,14 @@ Two layers, cleanly split:
   deep-research turns); a cached request that's rejected transparently retries without caching, so it can
   never break a turn. The pill popover shows a **Cached** row when a hit lands. Off via
   `RESEARCH_ROOM_PROMPT_CACHE=0`.
+- **Converse streaming.** A converse reply streams token-by-token into a live bubble (Anthropic
+  and every OpenAI-compatible backend, incl. OpenRouter/DeepSeek/Moonshot/Grok-proxy); a **Stop**
+  button cancels it — the client aborts the request and the server drops the partial (no answer is
+  saved, matching a failed converse). The other modes (fusion / mapping / side-by-side / yes-and)
+  stay synchronous by design: their value is the finished panel + judge synthesis, not a live feed.
+  The JSONL append is unchanged — streaming is a display channel only, so the turn still lands once,
+  with full text + reasoning/usage/cost meta. Non-streaming seats (a CLI runner) show a working
+  indicator and land in one step.
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.
@@ -458,6 +466,10 @@ python tests/engine_phase32.py         # per-room artifacts: dir resolution + gu
 python tests/browser_phase32.py        # artifacts-dir overlay round-trip + saved chip (filename + copy-path)
 python tests/browser_phase33.py        # artifact viewer pane (open/render/resize/Esc) + human-bubble realignment
 python tests/browser_phase34.py        # pane coexistence: wide→both, narrow→swap, splitter clamp, resize/sidebar
+python tests/browser_phase35.py        # fast-path composer: disclosure + per-room mode/addressee stickiness
+python tests/engine_phase36.py         # converse streaming: adapter SSE deltas + engine on_delta threading + abort
+python tests/route_phase36.py          # streaming SSE route: delta*→done, error event, reject non-converse
+python tests/browser_phase36.py        # live converse bubble grows + Stop (no ai turn) + room-switch detach
 ```
 
 ## Environment

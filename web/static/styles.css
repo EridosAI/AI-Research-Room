@@ -558,6 +558,15 @@ input, textarea { color: var(--text-primary); }
 .turn.pending .pending-foot { display: flex; align-items: center; justify-content: flex-end; gap: 4px;
   font-size: var(--text-xs); color: var(--text-tertiary); margin-top: 6px; }
 
+/* live converse stream (Phase 36.4) — an ordinary AI bubble with a "streaming…" foot + Stop;
+   the foot reuses .pending-foot's right-aligned spinner idiom. */
+.turn.streaming .pending-foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  font-size: var(--text-xs); color: var(--text-tertiary); margin-top: 6px; }
+.stop-btn { font: inherit; font-size: var(--text-xs); line-height: 1; padding: 3px 9px; cursor: pointer;
+  color: var(--text-secondary); background: var(--bg-tertiary); border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md); }
+.stop-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
 /* Ctrl/Cmd+K room switcher palette (Phase 31.4) — reuses .overlay/.overlay-card */
 .palette-card { width: min(560px, 100%); padding: 12px; }
 #palette-input { width: 100%; font-size: var(--text-md); padding: 10px 12px; margin-bottom: 8px; }

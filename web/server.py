@@ -12,6 +12,7 @@ Run:  python -m web.server   (http://127.0.0.1:8765)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -23,7 +24,7 @@ import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -553,6 +554,87 @@ def room_run(room_id: str, body: RunBody) -> dict:
         _round_end(room_id)
     _maybe_export(room_id)
     return {"result": result, "mode": body.mode, "room_id": room_id, "transcript": view}
+
+
+# ---- streaming converse (Phase 36) ------------------------------------------
+class _StreamAborted(Exception):
+    """Raised inside on_delta once the SSE client has disconnected — it unwinds the worker
+    (the raise propagates out of the adapter's `with httpx.stream(...)`, closing the upstream
+    connection) so NO ai turn is appended: the answerless-human-turn shape of a failed converse."""
+
+
+@app.post("/rooms/{room_id}/run/stream")
+async def room_run_stream(room_id: str, body: RunBody, request: Request):
+    """Streaming converse. SSE events: `delta` {text} per chunk → terminal `done` (SAME payload
+    shape as /run) or `error` {message}. Converse ONLY — other modes 400 (the client streams
+    converse and keeps /run for everything else). The engine stays sync: the blocking round runs
+    on a worker thread and deltas cross a thread-safe bridge into this async generator. A client
+    disconnect flips `abort`, so the next delta raises _StreamAborted and the round drops its
+    partial (no ai turn). Same validation + _round_begin/_round_end bookkeeping as room_run."""
+    _require_room(room_id)
+    if body.mode != "converse":
+        raise HTTPException(400, "streaming is converse-only; use /run for other modes")
+    if not body.prompt.strip():
+        raise HTTPException(400, "prompt required")
+    if body.target and body.target not in providers.registry():
+        raise HTTPException(400, f"unknown provider: {body.target}")
+    label = _load_ui().get("display_name") or "human"
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    abort = threading.Event()
+
+    def emit(item):                                   # worker thread → event loop (thread-safe)
+        loop.call_soon_threadsafe(q.put_nowait, item)
+
+    def on_delta(chunk):
+        if abort.is_set():
+            raise _StreamAborted()
+        emit(("delta", {"text": chunk}))
+
+    _round_begin(room_id)   # the "running" signal, before the worker (matches room_run: shows queued)
+
+    def worker():
+        try:
+            with _room_lock(room_id):
+                result = modes.converse(room_id, body.prompt, addressed_to=body.target,
+                                        human_label=label, on_delta=on_delta)
+                view = _full_room(room_id)
+            emit(("done", {"result": result, "mode": "converse", "room_id": room_id, "transcript": view}))
+            try:
+                _maybe_export(room_id)                # best-effort; never turns a done into an error
+            except Exception:                         # noqa: BLE001
+                pass
+        except _StreamAborted:
+            pass                                      # cancelled: human turn stands, no ai turn, no event
+        except (FileNotFoundError, ValueError) as e:
+            emit(("error", {"message": str(e)}))
+        except Exception as e:                        # noqa: BLE001
+            emit(("error", {"message": f"{type(e).__name__}: {e}"}))
+        finally:
+            _round_end(room_id)
+            emit(None)                                # sentinel: close the generator
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break                         # client gone → finally aborts the worker
+                    continue
+                if item is None:
+                    break
+                kind, data = item
+                yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+        finally:
+            abort.set()                               # disconnect OR normal end → stop the worker if live
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ---- roll back the last round (Phase 27) ------------------------------------

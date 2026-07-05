@@ -396,6 +396,21 @@ def _mock_text(p: Provider, payload: dict) -> str:
     return f"[mock:{p.key}/{p.model}] {snippet}"
 
 
+def _mock_stream(text: str, on_delta) -> None:
+    """Streaming test double: emit `text` as per-word deltas so the streaming path is
+    exercisable offline (mock backend only; cli/mock-cli seats never stream). Chunks
+    concatenate back to `text`. on_delta may raise (abort) — propagate it, as a real stream
+    would; the caller appends no turn (append is post-return). RR_STREAM_DELAY (seconds/word)
+    paces the deltas so the browser gate can observe incremental growth + hit Stop mid-stream."""
+    import os
+    import time
+    delay = float(os.environ.get("RR_STREAM_DELAY", "0") or 0)
+    for i, w in enumerate(text.split(" ")):
+        if delay and i:
+            time.sleep(delay)
+        on_delta(w if i == 0 else " " + w)
+
+
 def _mock_search(p: Provider) -> dict:
     """Deterministic, no-network web-search trace for offline tests. Includes one
     http(s) source and one javascript: URL so the UI's link allowlist is exercised
@@ -502,7 +517,7 @@ def _guard_artifacts(payload: dict, artifacts_dir: str | None) -> dict:
 def call_model(provider_key: str, payload: dict, tools: bool = False,
                effort: str = "medium", max_tokens: int | None = None,
                reasoning_effort: str | None = None, cache: bool = False,
-               artifacts_dir: str | None = None) -> ModelReply:
+               artifacts_dir: str | None = None, on_delta=None) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -525,6 +540,8 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     payload = _guard_artifacts(payload, artifacts_dir)   # room artifacts dir → awareness line (Phase 32.2)
     if p.backend == "mock":
         text = _mock_text(p, payload)
+        if on_delta is not None:
+            _mock_stream(text, on_delta)          # streaming test double (per-word deltas)
         rsn = (f"[mock reasoning · {p.key}] step 1 … step 2 … therefore." if p.reasoning else None)
         # mock echoes its configured model as the "served" one — gives the provenance
         # path a value to render/assert offline (mirrors the reasoning toggle).
@@ -539,12 +556,13 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     key = secrets.get(provider_key)
     if p.backend == "anthropic":
         text, reasoning, raw, served, search, finish = anthropic_style.chat(
-            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens)
+            p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens,
+            on_delta=on_delta)
         kind = "summarized" if reasoning else None
     else:
         text, reasoning, raw, served, search, finish = openai_style.chat(
             p, key, payload, reasoning=p.reasoning, web_search=do_search, max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort, cache=cache)
+            reasoning_effort=reasoning_effort, cache=cache, on_delta=on_delta)
         kind = "full" if reasoning else None
     usage = ({**raw, "exact": True} if raw else _estimate_usage(payload, text))
     return ModelReply(text, reasoning, kind, usage, served_model=served,

@@ -36,6 +36,8 @@ let STATE = {
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
   pending: null,             // optimistic user turn {text, ts} awaiting the server (Phase 31.3)
+  streaming: null,           // live converse AI bubble {speaker, text} while a stream runs (Phase 36.4)
+  streamAbort: null,         // AbortController for the in-flight converse stream (Phase 36.5)
   roomModes: {},             // room_id -> session interaction mode (Phase 35.2); default converse
   roomAddressees: {},        // room_id -> session addressee (Phase 35.2); default auto (last AI)
   advancedOpen: false,       // is the composer's mode disclosure open? (Phase 35.1)
@@ -239,6 +241,22 @@ function renderPending(p) {
   const body = el("div", "body"); renderMd(body, p.text); div.appendChild(body);
   const foot = el("div", "pending-foot");
   foot.append(el("span", "spinner"), document.createTextNode("sending…"));
+  div.appendChild(foot);
+  return div;
+}
+
+// The live AI bubble while a converse streams (Phase 36.4): the speaker's turn, its body
+// re-rendered per delta, plus a spinner + a Stop button (36.5). Transient — on the terminal
+// `done`, adoptRoom swaps in the authoritative turn (STATE.streaming is nulled first, so no
+// duplicate); the who-line speaker is a best-guess until then (auto-addressee resolves on adopt).
+function renderStreaming(s) {
+  const div = el("div", "turn streaming");
+  div.appendChild(whoLine(s.speaker, colorOf(s.speaker), ""));
+  const body = el("div", "body"); renderMd(body, s.text || "…"); div.appendChild(body);
+  const foot = el("div", "pending-foot");
+  const stop = el("button", "stop-btn"); stop.type = "button"; stop.textContent = "Stop";
+  stop.addEventListener("click", () => { if (STATE.streamAbort) STATE.streamAbort.abort(); });
+  foot.append(el("span", "spinner"), document.createTextNode("streaming… "), stop);
   div.appendChild(foot);
   return div;
 }
@@ -578,7 +596,7 @@ function render() {
     main.innerHTML = '<div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>';
     return;
   }
-  if (!STATE.turns.length && !STATE.pending) {
+  if (!STATE.turns.length && !STATE.pending && !STATE.streaming) {
     const roster = (STATE.room.participants || []).length;
     main.innerHTML = roster
       ? '<div class="empty">Empty room — send the first message.</div>'
@@ -586,7 +604,8 @@ function render() {
     return;
   }
   for (const b of groupTurns(STATE.turns)) main.appendChild(b.type === "round" ? renderRound(b) : renderConverse(b.turn));
-  if (STATE.pending) main.appendChild(renderPending(STATE.pending));   // optimistic user turn (Phase 31.3)
+  if (STATE.pending) main.appendChild(renderPending(STATE.pending));       // optimistic user turn (Phase 31.3)
+  if (STATE.streaming) main.appendChild(renderStreaming(STATE.streaming)); // live converse AI bubble (Phase 36.4)
   main.scrollTop = main.scrollHeight;
 }
 
@@ -1013,6 +1032,9 @@ function adoptRoom(view) {
   };
   STATE.turns = view.turns || [];
   STATE.pending = null;                 // authoritative turns supersede any optimistic bubble (Phase 31.3)
+  // A live converse stream belongs to ONE room; switching away detaches its bubble so it never
+  // paints into another room (the stream keeps draining server-side as a background round). (36.4)
+  if (STATE.streaming && STATE.streaming.roomId !== view.id) STATE.streaming = null;
   if (view.margin_turns !== undefined) STATE.marginTurns = view.margin_turns || [];
   renderComposerPickers();
   render();
@@ -1030,6 +1052,7 @@ let _roomPollTimer = null, _watching = null;
 function stopRoomPoll() { if (_roomPollTimer) { clearTimeout(_roomPollTimer); _roomPollTimer = null; } }
 function watchActiveRoom(running) {
   stopRoomPoll();
+  if (STATE.streaming) return;          // the live stream IS the running view — poll stands down (Phase 36.4)
   if (STATE.room && running) {
     _watching = STATE.room.id;
     setStatus("a round is running in this room…", true);
@@ -1259,11 +1282,16 @@ async function send() {
         return;
       }
     }
-    // 2. the message turn (+ its model round) — one unified dispatch endpoint
+    // 2. the message turn (+ its model round). Converse STREAMS (Phase 36); the other modes
+    //    keep the one-shot /run dispatch (panel/judge stay synchronous by design).
     setStatus(modeStatus(sel), true);
     STATE.pending = { text, ts: Date.now() };   // optimistic user bubble, painted this frame (Phase 31.3)
     render();
-    const data = await api(`/rooms/${roomId}/run`, "POST", sel);
+    const data = mode === "converse"
+      ? await streamConverse(roomId, sel)        // SSE: live AI bubble + Stop (Phase 36.4/36.5)
+      : await api(`/rooms/${roomId}/run`, "POST", sel);
+    // (streamConverse's finally already released its own STATE.streaming/streamAbort — scoped
+    //  by identity so a backgrounded overlapping stream isn't clobbered.)
     input.value = "";
     delete STATE.drafts[roomId];                 // sent successfully → no draft to restore (Phase 31.2)
     // Concurrency: render the result ONLY if its room is still on screen. If the
@@ -1278,8 +1306,79 @@ async function send() {
     // send and the user hasn't moved on to another room's activity.
     if (STATE.room && STATE.room.id === data.room_id) setStatus("");
   } catch (e) {
-    STATE.pending = null; render();              // drop the optimistic bubble; #input keeps the draft (Phase 31.3/31.2)
-    setStatus(""); banner(`${mode} failed: ${e.message}`);
+    // streamConverse's finally released its own stream slots (identity-scoped); just drop the echo.
+    STATE.pending = null; render();              // drop the optimistic bubble
+    if (e && e.name === "AbortError") {          // user hit Stop (Phase 36.5): the message WAS sent
+      input.value = ""; delete STATE.drafts[roomId];   // (human turn committed) → don't restore the draft
+      try { if (STATE.room && STATE.room.id === roomId) adoptRoom(await api(`/rooms/${roomId}`)); } catch (_e) { /* */ }
+      await refreshRooms();
+      setStatus(""); banner("stopped — no answer saved.");
+    } else {
+      setStatus(""); banner(`${mode} failed: ${e.message}`);   // #input keeps the draft (Phase 31.3/31.2)
+    }
+  }
+}
+
+// Stream a converse round over SSE (Phase 36.4/36.5): open a fetch reader, feed deltas into
+// STATE.streaming (throttled to an animation frame — never re-parse markdown per token), and
+// resolve with the terminal `done` payload (same shape as /run's return). An `error` event
+// rejects; the Stop button aborts the fetch (→ AbortError, handled by send()'s catch). The 3s
+// poll stands down while streaming (watchActiveRoom checks STATE.streaming).
+async function streamConverse(roomId, sel) {
+  const speaker = sel.target || (STATE.room && STATE.room.participants && STATE.room.participants[0]) || "assistant";
+  const ctrl = new AbortController();
+  const mine = STATE.streaming = { speaker, text: "", roomId };   // this stream's bubble (identity-owned)
+  STATE.streamAbort = ctrl;
+  stopRoomPoll();                                // the live stream IS the running view
+  render();
+  let raf = 0;
+  try {
+    const res = await fetch(`/rooms/${roomId}/run/stream`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sel), signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `${res.status} ${res.statusText}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", done = null, errMsg = null;
+    const paint = () => { raf = 0; render(); };
+    while (true) {
+      const { value, done: rdDone } = await reader.read();
+      if (rdDone) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        let ev = null, dat = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) dat = line.slice(5).trim();
+        }
+        if (ev === "delta") {
+          const chunk = (JSON.parse(dat).text) || "";
+          // paint only while THIS stream's bubble is the live one; if the user switched away
+          // (adoptRoom nulled it) or started a newer stream, we keep DRAINING but stop painting —
+          // the server round finishes as a background round (its turn surfaces via the sidebar dot + poll).
+          if (STATE.streaming === mine) {
+            STATE.streaming.text += chunk;
+            if (!raf) raf = requestAnimationFrame(paint);
+          }
+        } else if (ev === "done") { done = JSON.parse(dat); }
+        else if (ev === "error") { errMsg = JSON.parse(dat).message || "stream error"; }
+      }
+    }
+    if (errMsg) throw new Error(errMsg);
+    if (!done) throw new Error("stream ended without a result");
+    return done;
+  } finally {
+    if (raf) cancelAnimationFrame(raf);
+    // release the shared slots ONLY if a newer stream hasn't taken them over — with overlapping
+    // cross-room sends, the first to finish must not wipe the other's live bubble / Stop button.
+    if (STATE.streaming === mine) STATE.streaming = null;
+    if (STATE.streamAbort === ctrl) STATE.streamAbort = null;
   }
 }
 
