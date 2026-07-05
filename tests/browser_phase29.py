@@ -60,7 +60,7 @@ def main():
             page.locator('.room-row:has-text("cache")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='cache'")
 
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mockthink")
             page.fill("#input", "a long conversation turn")
             page.click("#send-btn")

@@ -486,6 +486,13 @@ input, textarea { color: var(--text-primary); }
   display: flex; flex-direction: column; min-height: 0; }
 .composer-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
 .composer-row:last-child { margin-bottom: 0; }
+/* fast-path composer (Phase 35): the mode row wraps so #composer-advanced drops to its own
+   line when opened; the toggle is a chip that names the active mode. */
+.composer-row.mode-row { flex-wrap: wrap; }
+.mode-toggle { font-size: var(--text-sm); padding: 3px 11px; color: var(--text-secondary); }
+.mode-toggle.active { border-color: var(--accent-border); color: var(--accent-text); }
+.composer-advanced { flex-basis: 100%; display: flex; gap: 10px; align-items: center;
+  flex-wrap: wrap; margin-top: 8px; }
 .composer-row.input-row { flex: 1 1 auto; align-items: stretch; min-height: 0; }
 .composer-row.input-row #input { resize: none; height: 100%; }
 .mode { font-size: var(--text-sm); color: var(--text-tertiary); cursor: pointer; }

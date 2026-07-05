@@ -68,7 +68,7 @@ def main():
             assert page.locator("#rollback-btn").is_disabled(), "undo disabled with no turns"
 
             # --- run a side-by-side with 'panel sees conversation' on ---
-            page.select_option("#mode", "side_by_side")
+            page.select_option("#mode", "side_by_side", force=True)
             page.check('#sxs-pick input[value="mock"]')
             page.check('#sxs-pick input[value="mockthink"]')
             page.check("#sxs-context")                        # panel sees conversation

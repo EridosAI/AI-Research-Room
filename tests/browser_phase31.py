@@ -145,7 +145,7 @@ def main():
             # draft preserved on send failure (+ no ghost bubble — 31.3 error path)
             page.locator('.room-row:has-text("failroom")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='failroom'")
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mockfail")
             page.fill("#input", "keep-me-on-error")
             page.click("#send-btn")
@@ -159,7 +159,7 @@ def main():
             # ================= 31.3 optimistic render =================
             page.locator('.room-row:has-text("slowroom")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='slowroom'")
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mockslow")
             page.fill("#input", "optimistic-slow-xyz")
             page.click("#send-btn")

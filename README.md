@@ -299,8 +299,11 @@ A single static page (vanilla HTML/JS, `marked` + `DOMPurify` from CDN, no build
   that updated while you were elsewhere) with **⚙ providers** at the foot;
 - a **room view** — colour-coded transcript stream, research rounds rendered as one
   composite block (collapsed panel cards with "view full" above the foregrounded
-  synthesis), a composer with a mode toggle, an addressee selector (converse), and a
-  per-round model picker + judge selector (research);
+  synthesis), and a **fast-path composer**: by default just a mode chip + addressee +
+  textarea — type and hit Enter. The presiding machinery (mode select, judge, panel,
+  round effort) lives behind the chip; click it to expand (it auto-opens for non-converse
+  modes, and names the active mode when collapsed). Mode + addressee are remembered
+  **per room** for the session;
 - a **models** control per room to choose its participants and judge;
 - the **margin** — a resizable side-panel with its own model, a window selector
   (`last turn` / `last 3 turns` / `full transcript`), and a "copy to main" on each answer;

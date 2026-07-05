@@ -73,17 +73,17 @@ def main():
 
             # --- contextual reveal: mapping shares panel params (+ context toggle); yes-and shows the ordered pair ---
             def vis(s): return page.locator(s).is_visible()
-            page.select_option("#mode", "mapping")
+            page.select_option("#mode", "mapping", force=True)
             assert vis("#research-opts") and page.locator("#panel-context").count() == 1, \
                 "mapping shows the panel params + the 'panel sees conversation' toggle"
-            page.select_option("#mode", "yes_and")
+            page.select_option("#mode", "yes_and", force=True)
             assert vis("#yesand-opts") and not vis("#research-opts"), "yes-and shows its own params"
             assert page.locator("#ya-a").count() == 1 and page.locator("#ya-b").count() == 1, \
                 "yes-and shows the ordered pair (A → B)"
             print("reveal OK: mapping shares panel params + context toggle; yes-and shows A→B")
 
             # --- mapping run → judge turn labelled 'map' ---
-            page.select_option("#mode", "mapping")
+            page.select_option("#mode", "mapping", force=True)
             page.fill("#input", "Best caching strategy?")
             posts.clear()
             page.click("#send-btn")
@@ -94,7 +94,7 @@ def main():
             print("mapping OK: renders a round; judge turn labelled 'map' (not synthesis)")
 
             # --- yes-and run → two stacked answers (A then B) via /run ---
-            page.select_option("#mode", "yes_and")
+            page.select_option("#mode", "yes_and", force=True)
             page.select_option("#ya-a", "mock")
             page.select_option("#ya-b", "mockthink")
             page.fill("#input", "Design a cache.")

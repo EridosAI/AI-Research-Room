@@ -69,7 +69,7 @@ def main():
             page.wait_for_function("document.querySelector('#title').textContent==='meta'")
 
             # --- a converse turn with reasoning (mockthink) ---
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mockthink")
             page.fill("#input", "think about caching")
             page.click("#send-btn")

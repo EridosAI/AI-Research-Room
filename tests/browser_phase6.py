@@ -72,7 +72,7 @@ def main():
             print("libs loaded (marked + DOMPurify)")
 
             # --- research round → composite block ---
-            page.select_option("#mode", "fusion")
+            page.select_option("#mode", "fusion", force=True)
             page.fill("#input", "Pick a vector index for 10M embeddings")
             page.click("#send-btn")
             page.wait_for_selector(".round .synthesis", timeout=30000)
@@ -93,7 +93,7 @@ def main():
             print("view full OK: collapsed → expanded stored raw")
 
             # --- converse with an XSS payload → must be sanitized ---
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mock")
             page.fill("#input", '<img src=x onerror="window.__xss=1"> hi')
             page.click("#send-btn")
@@ -114,7 +114,7 @@ def main():
             fpage.wait_for_timeout(500)
             assert fpage.evaluate("typeof window.DOMPurify") == "undefined", "DOMPurify loaded despite CDN block"
             assert not fpage.locator("#banner").is_hidden(), "fail-closed banner not shown"
-            fpage.select_option("#mode", "converse")
+            fpage.select_option("#mode", "converse", force=True)
             fpage.select_option("#addressee", "mock")
             fpage.fill("#input", '<img src=x onerror="window.__xss3=1"> hello')
             fpage.click("#send-btn")

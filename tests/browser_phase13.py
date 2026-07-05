@@ -96,7 +96,7 @@ def main():
             print("accent OK: one hue recoloured all six accent roles + persisted")
 
             # speaker-dot identity stays OUTSIDE the accent system
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mock")
             page.fill("#input", "ping")
             page.press("#input", "Enter")

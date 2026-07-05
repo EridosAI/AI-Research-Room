@@ -77,7 +77,7 @@ def main():
             # --- switch to alpha, fire the slow research round ---
             page.locator('.room-row:has-text("alpha")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='alpha room'")
-            page.select_option("#mode", "fusion")
+            page.select_option("#mode", "fusion", force=True)
             page.fill("#input", "slow round in alpha")
             t0 = time.time()
             page.click("#send-btn")            # fire — do NOT await completion
@@ -90,7 +90,7 @@ def main():
             print("switch OK: moved to beta while alpha still running; no alpha turns on screen")
 
             # --- converse in beta while alpha is still in flight ---
-            page.select_option("#mode", "converse")
+            page.select_option("#mode", "converse", force=True)
             page.select_option("#addressee", "mock")
             page.fill("#input", "quick hello in beta")
             page.click("#send-btn")

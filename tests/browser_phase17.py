@@ -74,7 +74,7 @@ def main():
             print("guard OK: scheme allowlist (http(s) href, javascript: blocked) + empty-meta absence")
 
             # --- research round → 'sources (N)' disclosure in the footer ---
-            page.select_option("#mode", "fusion")
+            page.select_option("#mode", "fusion", force=True)
             page.fill("#input", "state of optical computing?")
             page.click("#send-btn")
             page.wait_for_selector(".round .synthesis", timeout=30000)

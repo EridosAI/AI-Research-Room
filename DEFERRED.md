@@ -237,6 +237,20 @@ ring — without disturbing the other seats' context. Until then the numerator i
   viewer a transient reading pane — but if it reads as inconsistent in use, give the margin the same
   Esc treatment (it would slot in after the viewer in the precedence chain).
 
+## Deferred from Phase 35 (composer fast path)
+
+- **Cross-restart persistence for mode / addressee.** Phase 35 made the composer's mode + addressee
+  **session-scoped per-room** (`STATE.roomModes` / `STATE.roomAddressees`, keyed by room id — the
+  drafts precedent, no disk keys). They survive room switches but reset to converse + auto on reload,
+  by design. Persisting them across restart would ride a **`room.json` key pair** (`session_mode`,
+  `session_addressee`) added to the `_default_meta`/`_MUTABLE`/`RoomUpdate` trio (like `viewer_width`)
+  — deferred until "my room forgot it was a fusion room" is a felt need.
+- **Per-room round effort.** The `#effort` / `#sxs-effort` / `#ya-effort` dropdowns (relabelled "round
+  effort") stay **global composer state** (default medium) — lower stakes, and they live inside the
+  disclosure. A per-room round-effort would follow the same session-map pattern as mode/addressee.
+  Distinct from the durably-per-room **per-model reasoning dial** (`reasoning_effort` in `room.json`,
+  the models popover) — do not conflate the two.
+
 ## Next up (not deferred, just not started)
 
 - **Packaging / installable.** The whole point of settling the surface first: package this

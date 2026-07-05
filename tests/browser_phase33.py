@@ -187,7 +187,7 @@ def main():
             # ================= 33.1 pending bubble alignment =================
             page.locator('.room-row:has-text("slowroom")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='slowroom'")
-            page.select_option("#mode", "converse"); page.select_option("#addressee", "mockslow")
+            page.select_option("#mode", "converse", force=True); page.select_option("#addressee", "mockslow")
             page.fill("#input", "pending-align-check"); page.click("#send-btn")
             page.wait_for_selector(".turn.pending", timeout=2500)
             px = page.locator(".turn.pending").bounding_box()["x"]

@@ -36,6 +36,9 @@ let STATE = {
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
   pending: null,             // optimistic user turn {text, ts} awaiting the server (Phase 31.3)
+  roomModes: {},             // room_id -> session interaction mode (Phase 35.2); default converse
+  roomAddressees: {},        // room_id -> session addressee (Phase 35.2); default auto (last AI)
+  advancedOpen: false,       // is the composer's mode disclosure open? (Phase 35.1)
 };
 
 // ===== theme mode (dark / light / system) ===================================
@@ -593,8 +596,12 @@ function providerOf(key) { return STATE.participants.find((p) => p.name === key)
 
 function renderAddressee() {
   const sel = $("#addressee");
+  const cur = sel.value;                                    // preserve the live pick across the rebuild —
   const opts = roomRoster().map((k) => `<option value="${k}">@${k}</option>`).join("");
   sel.innerHTML = '<option value="">auto (last AI)</option>' + opts;
+  // …so an in-room re-adopt (send result, poll, rollback, promote, settings-save) doesn't silently
+  // revert a chosen addressee to auto (Phase 35.2). restoreRoomComposer stays authoritative on switch.
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;   // else falls back to auto
 }
 
 function renderPanelPick() {
@@ -1072,12 +1079,14 @@ async function switchRoom(id) {
   if (STATE.room && STATE.room.id === id) { focusComposer(); return; }   // already here — no-op re-adopt
   banner(null); setStatus("");   // a background round's status must not bleed across rooms
   stashDrafts();                 // save the room we're leaving BEFORE adopt swaps STATE.room (Phase 31.2)
+  stashRoomComposer();           // …and its session mode + addressee (Phase 35.2)
   closeViewer();                 // the viewer's content belongs to the room we're leaving (Phase 33.2)
   STATE.staged = []; renderStagedFiles();   // staged files belong to the room you left
   try {
     const view = await api(`/rooms/${id}/activate`, "POST");   // sets active + marks read
     adoptRoom(view);
     restoreDrafts();             // load the room we arrived in — SYNCHRONOUS with adopt so the
+    restoreRoomComposer();       // …restore its mode + addressee AFTER adopt rebuilt pickers (Phase 35.2)
     focusComposer();             // composer is settled before the title is observable (Phase 31.1/31.2)
     await refreshRooms();        // sidebar refresh is independent — after the composer is settled
   } catch (e) { banner(e.message); }
@@ -1087,11 +1096,13 @@ async function newRoom() {
   const title = prompt("room title:");
   if (!title) return;
   stashDrafts();                 // preserve the room we're leaving (Phase 31.2)
+  stashRoomComposer();           // …and its session mode + addressee (Phase 35.2)
   closeViewer();                 // a fresh room has no artifact open (Phase 33.2)
   try {
     const data = await api("/rooms", "POST", { title });   // EMPTY room — forced decision
     adoptRoom(data.room);
     restoreDrafts();             // a fresh room starts with an empty composer — synchronous with adopt (Phase 31.2)
+    restoreRoomComposer();       // fresh room → converse + auto, collapsed (Phase 35.2)
     focusComposer();             // caret ready in the new room (Phase 31.1)
     banner("New room — choose its models and judge in “models” (top-right) before researching.");
     await refreshRooms();        // sidebar refresh is independent
@@ -1278,6 +1289,43 @@ function syncModeUI() {
   $("#research-opts").classList.toggle("hidden", m !== "fusion" && m !== "mapping");   // shared panel params
   $("#sxs-opts").classList.toggle("hidden", m !== "side_by_side");
   $("#yesand-opts").classList.toggle("hidden", m !== "yes_and");
+}
+
+// ===== composer fast path (Phase 35) =========================================
+// The collapsed composer asks nothing: a mode chip + addressee. Mode + its machinery live
+// in #composer-advanced, opened via the chip. Mode + addressee are session-scoped PER-ROOM
+// (STATE.roomModes / roomAddressees — the drafts precedent, one level up); no disk keys.
+const MODE_LABELS = { converse: "converse", fusion: "fusion", mapping: "mapping",
+                      side_by_side: "side-by-side", yes_and: "yes-and" };
+// The toggle names the active mode (so non-converse machinery is never invisible when
+// collapsed) + a chevron for the disclosure state; accented when non-converse.
+function updateModeChip() {
+  const m = currentMode();
+  const t = $("#mode-toggle"); if (!t) return;
+  t.textContent = (MODE_LABELS[m] || m) + " " + (STATE.advancedOpen ? "▾" : "▸");
+  t.classList.toggle("active", m !== "converse");
+}
+function setAdvanced(open) {
+  STATE.advancedOpen = !!open;
+  $("#composer-advanced").classList.toggle("hidden", !open);
+  updateModeChip();
+}
+// Stash/restore the room's session composer state, keyed by room id (mirrors stashDrafts).
+function stashRoomComposer() {
+  if (!STATE.room) return;
+  STATE.roomModes[STATE.room.id] = $("#mode").value;
+  STATE.roomAddressees[STATE.room.id] = $("#addressee").value;
+}
+function restoreRoomComposer() {
+  const id = STATE.room && STATE.room.id;
+  const mode = (id && STATE.roomModes[id]) || "converse";
+  $("#mode").value = mode; syncModeUI();
+  // addressee: re-select AFTER renderAddressee (in adoptRoom) rebuilt the options — that
+  // rebuild wipes any prior pick (recon §1); silently fall back to auto if it left the roster.
+  const want = (id && STATE.roomAddressees[id]) || "";
+  const sel = $("#addressee");
+  sel.value = [...sel.options].some((o) => o.value === want) ? want : "";
+  setAdvanced(mode !== "converse");   // auto-expand non-converse so active machinery is visible
 }
 
 // ===== room settings (per-room roster + judge) ===============================
@@ -1554,7 +1602,13 @@ $("#input").addEventListener("keydown", (e) => {
   // an IME candidate-commit (also pressed via Enter) as a send.
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
-$("#mode").addEventListener("change", syncModeUI);
+$("#mode").addEventListener("change", () => {
+  syncModeUI();
+  // reveal the machinery you just chose — a non-converse mode's controls must be visible,
+  // not just active (Phase 35.1/35.3). Manual collapse (the toggle) still works after.
+  if (currentMode() !== "converse") setAdvanced(true); else updateModeChip();
+});
+$("#mode-toggle").addEventListener("click", () => setAdvanced(!STATE.advancedOpen));  // open/close the disclosure
 $("#new-room-btn").addEventListener("click", newRoom);
 $("#room-settings-btn").addEventListener("click", openRoomSettings);
 
@@ -2060,6 +2114,7 @@ document.addEventListener("keydown", (e) => {
     } else {
       renderComposerPickers(); render();
     }
+    restoreRoomComposer();         // init the disclosure/chip (maps empty → converse + auto, collapsed) (Phase 35)
     focusComposer();               // land the caret in the composer on load (Phase 31.1)
   } catch (e) { banner(`could not reach engine: ${e.message}`); }
 })();

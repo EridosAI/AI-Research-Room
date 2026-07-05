@@ -76,10 +76,10 @@ def main():
             def visible(sel): return page.locator(sel).is_visible()
             assert visible("#converse-opts") and not visible("#research-opts") and not visible("#sxs-opts"), \
                 "converse default: only the addressee param shows"
-            page.select_option("#mode", "fusion")
+            page.select_option("#mode", "fusion", force=True)
             assert visible("#research-opts") and not visible("#converse-opts") and not visible("#sxs-opts"), \
                 "fusion: judge + panel params show"
-            page.select_option("#mode", "side_by_side")
+            page.select_option("#mode", "side_by_side", force=True)
             assert visible("#sxs-opts") and not visible("#research-opts") and not visible("#converse-opts"), \
                 "side-by-side: the two-seat picker shows"
             assert page.locator("#sxs-pick input[type=checkbox]").count() == 2, \

@@ -71,7 +71,7 @@ def main():
             page.wait_for_function("document.querySelector('#title').textContent==='alpha'")
 
             # fire a slow fusion round, then leave the room while it runs
-            page.select_option("#mode", "fusion")
+            page.select_option("#mode", "fusion", force=True)
             page.fill("#input", "slow round with a failing panelist")
             page.click("#send-btn")
             page.locator('.room-row:has-text("beta")').click()
