@@ -346,6 +346,25 @@ powershell.exe -ExecutionPolicy Bypass -File "$(wslpath -w tools/create_shortcut
 `Room.bat` is the launcher it points at (the console window it opens *is* the server —
 close it to stop). Drop a `room.ico` in the repo root for a custom taskbar icon.
 
+### Run as a service (always-up)
+
+For a pinned tab that stays warm — survives a crash, WSL idle, and a Windows reboot — install
+Fusion as a systemd **system** service (WSL with `systemd=true`). It auto-restarts on failure
+and starts when the distro boots; `Room.bat` still works for one-off dev runs when the service
+is stopped (they share port 8765, so don't run both at once).
+
+```bash
+tools/install-service.sh        # render the unit → enable → start → health-check :8765
+tools/uninstall-service.sh      # stop + remove it
+```
+
+The installer derives the repo, user, and drive-mount from its own location (override with
+`--user` / `--repo` / `--port`), renders [tools/fusion.service.template](tools/fusion.service.template)
+to `/etc/systemd/system/fusion.service` (needs `sudo`), and re-running it updates the unit and
+restarts. To also survive a **Windows reboot**, add the logon task in
+[tools/windows-autostart.md](tools/windows-autostart.md) (it boots the distro so systemd starts
+the service). The Grok proxy seat is intentionally **not** auto-managed — see that doc.
+
 ---
 
 ## Layout

@@ -251,6 +251,24 @@ ring — without disturbing the other seats' context. Until then the numerator i
   Distinct from the durably-per-room **per-model reasoning dial** (`reasoning_effort` in `room.json`,
   the models popover) — do not conflate the two.
 
+## Deferred from the always-up service (tools/)
+
+The `tools/` service kit (`fusion.service.template` + `install-service.sh` /
+`uninstall-service.sh` + `windows-autostart.md`) keeps the **server** always up: a systemd
+system service (auto-restart, starts at distro boot) plus a Windows logon task that boots the
+WSL distro so systemd starts it. One dependency is deliberately **documented, not automated**:
+
+- **Always-up Hermes proxy for the Grok seat.** The Grok panelist needs the Hermes OAuth
+  proxy at `127.0.0.1:8645`, whose **OAuth token expires**. A "restart the proxy" unit would
+  fake reliability it doesn't have — a running-but-unauthed proxy still can't answer, and the
+  seat fails in a way a process-liveness check won't catch. So the server runs always and the
+  Grok seat **degrades to absent** until the proxy is relaunched by hand (every other model
+  keeps working). A real always-up proxy = its own unit **plus** a token-refresh/re-auth story
+  (detect a 401/expired token, re-run the OAuth flow, restart) — deferred until it's a felt
+  need. See [tools/windows-autostart.md](tools/windows-autostart.md) for the manual relaunch.
+- **Recency/token-refresh generalised.** Same shape would cover any future subscription-CLI
+  seat run as a sidecar. Not built; the proxy is the only such seat today.
+
 ## Next up (not deferred, just not started)
 
 - **Packaging / installable.** The whole point of settling the surface first: package this

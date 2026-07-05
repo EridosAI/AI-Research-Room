@@ -1,0 +1,38 @@
+# Fusion research room — systemd *system* service (always-up), template form.
+#
+# This file is NOT a working unit: tools/install-service.sh fills the {{...}}
+# placeholders and writes the rendered result to /etc/systemd/system/fusion.service.
+# Nothing user-specific is committed — only these placeholders. See README → "Run as a
+# service (always-up)" and tools/windows-autostart.md.
+#
+#   {{REPO}}  — repo root (this checkout), e.g. /mnt/c/Users/.../Fusion
+#   {{USER}}  — the account the server runs as (reads secrets.json, writes the vault)
+#   {{PORT}}  — the port the server binds (default 8765). A system unit does NOT inherit the
+#               installer's shell env, so the port must be baked in here, not just probed.
+#   {{MOUNT}} — the filesystem mount the repo lives on (e.g. /mnt/c on WSL). The drive
+#               must be mounted before the server starts. Derived by the installer and
+#               deliberately NOT the same as {{REPO}}: a repo path can contain spaces
+#               (…/Future Projects/…), and RequiresMountsFor takes a space-SEPARATED list,
+#               so passing the full repo path there would mis-split into bogus mounts.
+
+[Unit]
+Description=Fusion research room
+RequiresMountsFor={{MOUNT}}
+After=network-online.target
+
+[Service]
+User={{USER}}
+WorkingDirectory={{REPO}}
+# Bind port baked into the unit (a system service ignores the caller's RESEARCH_ROOM_PORT).
+Environment=RESEARCH_ROOM_PORT={{PORT}}
+# The interpreter path is quoted so a repo path with spaces still execs as one argument
+# (systemd tokenises ExecStart on whitespace; an unquoted space would split the binary path).
+# No --open: headless service, no browser.
+ExecStart="{{REPO}}/.venv/bin/python" -m web.server
+# Fallback if drvfs mount ordering still races RequiresMountsFor (uncomment):
+#ExecStartPre=/bin/sleep 10
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
