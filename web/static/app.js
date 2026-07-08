@@ -128,7 +128,7 @@ function applyBrightness(level) {
 }
 
 // Font size — one multiplier the 12–35px ramp is expressed against (mode-independent).
-const FONT_SCALE = { compact: 0.92, default: 1.0, large: 1.12 };
+const FONT_SCALE = { compact: 0.92, default: 1.0, large: 1.12, xlarge: 1.3, huge: 1.5 };
 function applyFontScale(level) {
   document.documentElement.style.setProperty("--font-scale", String(FONT_SCALE[level] ?? 1));
 }
@@ -2037,7 +2037,8 @@ function renderThemeControls() {
     async (v) => { STATE.ui.text_brightness = v; currentLevel = v; applyBrightness(v); renderThemeControls();
                    try { await api("/ui", "PUT", { text_brightness: v }); } catch (e) {} });
   renderSeg("#fontsize-opts",
-    [{ value: "compact", label: "Compact" }, { value: "default", label: "Default" }, { value: "large", label: "Large" }],
+    [{ value: "compact", label: "Compact" }, { value: "default", label: "Default" }, { value: "large", label: "Large" },
+     { value: "xlarge", label: "XL" }, { value: "huge", label: "XXL" }],
     STATE.ui.font_scale || "default",
     async (v) => { STATE.ui.font_scale = v; applyFontScale(v); renderThemeControls();
                    try { await api("/ui", "PUT", { font_scale: v }); } catch (e) {} });

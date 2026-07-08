@@ -88,12 +88,16 @@ def main():
             assert _json("/ui")["text_brightness"] == "soft", "brightness not persisted"
             print(f"14B brightness OK: ramp derived from one input ({tp!r}), persisted")
 
-            # --- 14B: font size scale ---
+            # --- 14B: font size scale (incl. the wider XL/XXL steps) ---
             page.click('#fontsize-opts button:has-text("Large")')
             page.wait_for_timeout(150)
             assert cssvar(page, "--font-scale") == "1.12", f"font scale not applied: {cssvar(page,'--font-scale')!r}"
             assert _json("/ui")["font_scale"] == "large", "font scale not persisted"
-            print("14B font OK: --font-scale applied + persisted")
+            page.click('#fontsize-opts button:has-text("XXL")')          # the widened range (huge = 1.5)
+            page.wait_for_timeout(150)
+            assert cssvar(page, "--font-scale") == "1.5", f"XXL font scale not applied: {cssvar(page,'--font-scale')!r}"
+            assert _json("/ui")["font_scale"] == "huge", "XXL font scale not persisted"
+            print("14B font OK: --font-scale applied + persisted (incl. XXL/huge = 1.5)")
 
             # --- 14B: display name replaces 'human' in UI and in build_context ---
             page.fill("#display-name", "Jason")
@@ -118,7 +122,7 @@ def main():
             assert page.evaluate("window.localStorage.length") == 0, "localStorage used (forbidden)"
             page.reload(wait_until="networkidle")
             assert "0.82" in cssvar(page, "--text-primary"), "brightness not restored after reload"
-            assert cssvar(page, "--font-scale") == "1.12", "font scale not restored after reload"
+            assert cssvar(page, "--font-scale") == "1.5", "font scale (huge) not restored after reload"
             page.locator('.room-row:has-text("p14 room")').click()
             page.wait_for_function("document.querySelector('#title').textContent==='p14 room'")
             assert "Jason" in page.locator(".turn.human .who").last.inner_text(), "display name not restored after reload"
