@@ -681,9 +681,7 @@ function svgTitle(node, text) {
 // everything else — ai, judge, and promoted margin notes — sits on its speaker's lane.
 function laneOf(t) { return t.role === "human" ? "human" : t.speaker; }
 
-// human leftmost, then the room roster in order, then any speaker only the transcript knows
-// about: a departed seat, a judge who was never a panelist, a promoted margin model.
-// Rounds, indexed by row. A research round is a fan-out/fan-in EVENT, not a step in a
+// Rounds, indexed by turn position. A research round is a fan-out/fan-in EVENT, not a step in a
 // conversation, and the graph draws it as one: head → every surviving panelist → judge.
 // Absent panelists produce no turn, so they produce no edge — correct by construction.
 function trajRounds(turns) {
@@ -700,10 +698,36 @@ function trajRounds(turns) {
   return rounds;
 }
 
+// LOGICAL rows, not turns. A panel is blind and concurrent: N panelists answering the same
+// prompt are one event, not N steps, so every raw turn of a round collapses onto a single shared
+// row. A fusion round is three rows — prompt, panel band, judge — whatever the panel's size.
+// Grouped by round_id, not by file adjacency: rounds are contiguous under the room lock today,
+// and nothing here should depend on that staying true.
+function trajRows(turns) {
+  const rowOf = new Map();          // turn id → logical row
+  const bandOf = new Map();         // round_id → that round's shared panel row
+  let row = 0;
+  for (const t of turns) {
+    const rid = (t.meta || {}).round_id;
+    if (isForwardTurn(t) || !rid) { rowOf.set(t.id, row++); continue; }
+    if (!bandOf.has(rid)) bandOf.set(rid, row++);
+    rowOf.set(t.id, bandOf.get(rid));
+  }
+  return { rowOf, rows: row };
+}
+
+// Model lanes in roster order, then any speaker only the transcript knows about: a departed
+// seat, a judge who never sat on a panel, a promoted margin model. The human lane is inserted at
+// the MIDPOINT, so a fan spreads both ways and a converse swerve leaves and returns to the
+// middle. A speaker appearing mid-session shifts that index on the next redraw — the graph fully
+// re-derives anyway, and new speakers are rare; not worth position-pinning machinery.
 function trajLanes() {
-  const lanes = ["human"];
-  for (const k of (STATE.room && STATE.room.participants) || []) if (!lanes.includes(k)) lanes.push(k);
-  for (const t of STATE.turns) { const k = laneOf(t); if (k && !lanes.includes(k)) lanes.push(k); }
+  const models = [];
+  const add = (k) => { if (k && k !== "human" && !models.includes(k)) models.push(k); };
+  for (const k of (STATE.room && STATE.room.participants) || []) add(k);
+  for (const t of STATE.turns) add(laneOf(t));
+  const lanes = models.slice();
+  lanes.splice(Math.floor(models.length / 2), 0, "human");
   return lanes;
 }
 
@@ -719,10 +743,12 @@ function drawTrajGraph() {
     svg.setAttribute("height", "0");
     return;
   }
-  const n = STATE.turns.length;
+  // Spacing runs on the LOGICAL row count, so a big round compresses vertically instead of
+  // sprawling into a staircase of panelists.
+  const { rowOf, rows } = trajRows(STATE.turns);
   const railH = Math.max(rail.clientHeight || 0, 120);
-  const gap = Math.max(TRAJ.minRowGap, (railH - TRAJ.padTop - TRAJ.padBottom) / (n + 1));
-  const height = Math.round(TRAJ.padTop + gap * n + TRAJ.padBottom);
+  const gap = Math.max(TRAJ.minRowGap, (railH - TRAJ.padTop - TRAJ.padBottom) / (rows + 1));
+  const height = Math.round(TRAJ.padTop + gap * rows + TRAJ.padBottom);
   svg.setAttribute("height", String(height));
   svg.setAttribute("viewBox", `0 0 ${TRAJ.railW} ${height}`);
 
@@ -734,9 +760,9 @@ function drawTrajGraph() {
     const i = Math.max(0, lanes.indexOf(key));
     return lanes.length < 2 ? left : left + (i * (right - left)) / (lanes.length - 1);
   };
-  const rowY = (i) => TRAJ.padTop + gap * (i + 1);
+  const rowY = (r) => TRAJ.padTop + gap * (r + 1);
 
-  drawTrajBody(svg, { n, gap, height, lanes, laneX, rowY, marginX });
+  drawTrajBody(svg, { gap, height, lanes, laneX, rowY, rowOf, rows, marginX });
 }
 
 // A vertex. The judge carries the round's KIND in its shape — the one cheap signal that tells
@@ -747,7 +773,8 @@ const JUDGE_GLYPH = { synthesis: "circle", divergence: "ring", map: "diamond" };
 
 function trajNode(t, x, y, color, fwd) {
   const common = {
-    class: "traj-node", "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
+    class: `traj-node ${fwd ? "traj-vertex" : "traj-panel"}`,
+    "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
     "fill-opacity": fwd ? OP_FULL : OP_MID,
   };
   if (t.role !== "judge") return svgEl("circle", { cx: x, cy: y, r: 2.5, fill: color, ...common });
@@ -767,17 +794,25 @@ function trajNode(t, x, y, color, fwd) {
   return svgEl("circle", { cx: x, cy: y, r: 2.5, fill: color, ...common });
 }
 
+// Paint order, back to front. SVG has no z-index: document order IS depth.
+//   margin connectors + brackets → lane guides → fan edges → bright trajectory
+//   → dim panel dots → bright vertices → hit geometry (invisible, on top)
+// The margin connector crosses the model lanes now that the human lane is centred; putting it
+// first is what keeps it behind the lanes and dots it passes under.
 function drawTrajBody(svg, geom) {
-  const { gap, height, lanes, laneX, rowY } = geom;
+  const { gap, height, lanes, laneX, rowY, rowOf, rows } = geom;
   const turns = STATE.turns;
   const rounds = trajRounds(turns);
-  const xy = (i) => ({ x: laneX(laneOf(turns[i])), y: rowY(i) });
+  const yOf = (i) => rowY(rowOf.get(turns[i].id));
+  const xy = (i) => ({ x: laneX(laneOf(turns[i])), y: yOf(i) });
 
-  // lane guides — thin, solid, dot-coloured, well behind everything else
+  drawTrajMargin(svg, geom);   // furthest back: it passes beneath everything it crosses
+
+  // lane guides — thin, solid, dot-coloured
   for (const key of lanes) {
     svg.appendChild(svgTitle(svgEl("line", {
       x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane",
-      stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": OP_LANE,
+      "data-lane": key, stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": OP_LANE,
     }), key));
   }
 
@@ -832,24 +867,46 @@ function drawTrajBody(svg, geom) {
     prev = i;
   });
 
-  // nodes: bright vertices on the line, mid-register dots for the raw panel fan. A judge who
-  // also sat on the panel gets BOTH on its lane — the fan re-converging, by design.
-  turns.forEach((t, i) => {
+  // nodes, in two passes so the panel band never paints over a vertex. A judge who also sat on
+  // the panel gets BOTH on its lane — the fan re-converging, by design.
+  const drawNodes = (wantForward) => turns.forEach((t, i) => {
     const fwd = isForwardTurn(t);
+    if (fwd !== wantForward) return;
     const p = xy(i);
     const node = trajNode(t, p.x, p.y, colorOf(laneOf(t)), fwd);
     svgTitle(node, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
     svg.appendChild(node);
   });
+  drawNodes(false);            // dim panel dots
+  drawNodes(true);             // bright vertices
 
-  drawTrajMargin(svg, geom);   // 37.4 — connectors + brackets, drawn over the lanes
-
-  // full-width hit rects last so a click anywhere on a row lands, however thin the node
-  STATE.turns.forEach((t, i) => {
+  // One full-width hit rect per LOGICAL row, on top, so a click anywhere on a row lands however
+  // thin the node. A panel row spans several turns, so its rect jumps to the round's prompt —
+  // the one unambiguous target; the dots stay the precise per-turn targets.
+  const rowTarget = new Array(rows);
+  turns.forEach((t, i) => {
+    const r = rowOf.get(t.id);
+    if (rowTarget[r]) return;
+    if (isForwardTurn(t)) { rowTarget[r] = t; return; }
+    const rnd = rounds.get((t.meta || {}).round_id);
+    rowTarget[r] = rnd && rnd.head >= 0 ? turns[rnd.head] : t;
+  });
+  rowTarget.forEach((t, r) => {
     const hit = svgEl("rect", {
-      x: 0, y: rowY(i) - gap / 2, width: TRAJ.railW, height: Math.max(gap, 8),
-      class: "traj-hit", "data-turn-id": t.id,
+      x: 0, y: rowY(r) - gap / 2, width: TRAJ.railW, height: Math.max(gap, 8),
+      class: "traj-hit", "data-turn-id": t.id, "data-row": r,
     });
+    svgTitle(hit, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
+    svg.appendChild(hit);
+  });
+
+  // …and a per-node hit circle ABOVE the row rects. Without these the row rect would swallow
+  // every dot's click, and a panel row — several turns on one row — would lose its per-turn
+  // targets entirely. Hit geometry, never a drawn path.
+  const hitR = Math.max(3, Math.min(6, gap / 2));
+  turns.forEach((t, i) => {
+    const p = xy(i);
+    const hit = svgEl("circle", { cx: p.x, cy: p.y, r: hitR, class: "traj-hit-node", "data-turn-id": t.id });
     svgTitle(hit, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
     svg.appendChild(hit);
   });
@@ -868,7 +925,7 @@ function drawTrajBody(svg, geom) {
 const BRACKET_CAP = 3;   // px the bracket overshoots its end rows, so last_1 still draws
 
 function drawTrajMargin(svg, geom) {
-  const { laneX, rowY, marginX, height } = geom;
+  const { laneX, rowY, rowOf, marginX, height } = geom;
   const margins = STATE.marginTurns || [];
   const promoted = STATE.turns.filter((t) => t.meta && t.meta.from_margin);
   if (!margins.length && !promoted.length) return;
@@ -878,9 +935,9 @@ function drawTrajMargin(svg, geom) {
     stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.45,
   }));
 
-  const rowOf = new Map();                       // turn id → row index, current transcript only
-  STATE.turns.forEach((t, i) => rowOf.set(t.id, i));
-  const forwardRows = STATE.turns.map((t, i) => (isForwardTurn(t) ? i : -1)).filter((i) => i >= 0);
+  // window_ids only ever name forward turns, and every forward turn still owns its own logical
+  // row — so the row model change cannot move an anchor or a bracket.
+  const forward = STATE.turns.filter(isForwardTurn);
   const humanX = laneX("human");
 
   // A connector is an indicator, not a trajectory: straight, never curved. It spans the full
@@ -916,8 +973,9 @@ function drawTrajMargin(svg, geom) {
     }
 
     // legacy: best-effort ts correlation, clamped into range. Never throws, never brackets.
-    const anchor = forwardRows.filter((i) => (STATE.turns[i].ts || "") <= (q.ts || "")).pop();
-    if (anchor === undefined) continue;
+    const seen = forward.filter((t) => (t.ts || "") <= (q.ts || "")).pop();
+    if (!seen) continue;
+    const anchor = rowOf.get(seen.id);
     svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx", humanX),
       `margin (${meta.window || "window"}, approximate): ${(q.text || "").slice(0, 80)}`));
     svg.appendChild(originDot(rowY(anchor)));

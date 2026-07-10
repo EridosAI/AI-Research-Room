@@ -347,8 +347,8 @@ input, textarea { color: var(--text-primary); }
 /* uniform thin strokes; the curvature carries the elegance, not a taper. linecap/linejoin are
    inherited SVG presentation properties, so setting them on the root covers every stroke. */
 .traj-svg { display: block; width: 100%; stroke-linecap: round; stroke-linejoin: round; }
-.traj-hit { fill: transparent; cursor: pointer; }
-.traj-node { cursor: pointer; }
+.traj-hit, .traj-hit-node { fill: transparent; cursor: pointer; }
+.traj-node { pointer-events: none; }
 #traj-toggle.active { border-color: var(--accent-border); color: var(--accent-text); }
 
 /* the landing flash after a graph click — a streaming re-render may eat it; that's fine */

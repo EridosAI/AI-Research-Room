@@ -312,8 +312,10 @@ Three deliberate "not yet"s:
   anticipated this: drag on the rail to shape the *next* round (who answers, who judges) instead of
   using the composer dropdown. The selection object is already decoupled from execution, so this is a
   new producer, not a new execution path. The natural first slice is drag-from-human-dot → lane,
-  writing the existing session addressee. Phase 37.5's hit geometry (row rects + vertex circles) is
-  kept as *separate elements* from the drawn paths precisely so curves never complicate this.
+  writing the existing session addressee. Phase 37.5's hit geometry (row rects + node circles) is
+  kept as *separate elements* from the drawn paths precisely so curves never complicate this, and
+  37.6B's centred human lane is incidentally the layout that interaction wants: drag outward from
+  the middle, in either direction.
 - **Fan-edge hover affordances.** Highlighting a round's whole fan on hover would make a dense
   transcript's rounds pop out individually. Nice, not now.
 - **Distinct yes-and pair marking.** Yes-and writes two ordinary forward `converse` turns with no

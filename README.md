@@ -173,19 +173,20 @@ Two layers, cleanly split:
   with full text + reasoning/usage/cost meta. Non-streaming seats (a CLI runner) show a working
   indicator and land in one step.
 - **Trajectory graph.** A toggleable rail (`graph`, top-right) draws the shape of the conversation:
-  one vertical lane per speaker (human leftmost, then the roster; colours are the speaker dots), and a
+  one vertical lane per speaker — models in roster order with **your lane down the middle** — and a
   single bright line that visits each turn's lane in order, **swerving** out of one lane and into the
   next the way a subway map draws a branch. The bright line traces **forward context exactly** — it is
   a client-side mirror of `forward_turns()`, so a full-brightness stroke only ever touches a turn that
   flows onward. A research round is drawn as the **event** it is rather than a step in a conversation:
-  the direct chord is suppressed and the round fans out from your prompt to every panelist, then back
-  in to the judge (converging strokes all in the judge's colour). The judge's glyph names the mode —
-  filled circle for fusion's *synthesis*, a ring for side-by-side's *divergence*, a diamond for a
-  *map*. A **margin rail** on the right runs a connector from your lane across to the rail at the row
-  each side-question was asked beside, bracketing the turns it actually read. Clicking any row scrolls
-  the transcript to that turn. Display-only: it renders from turns the client already has, and the
-  transcript pane no longer yanks you to the bottom while you read scrollback (it follows the bottom
-  only if you were already there).
+  the direct chord is suppressed, and the round fans out from your prompt to every panelist *on one
+  shared row* (the panel is blind and concurrent, so it is one moment, not N) and back in to the
+  judge, the converging strokes all in the judge's colour. The judge's glyph names the mode — filled
+  circle for fusion's *synthesis*, a ring for side-by-side's *divergence*, a diamond for a *map*. A
+  **margin rail** on the right runs a connector from your lane across to the rail at the row each
+  side-question was asked beside, bracketing the turns it actually read. Clicking a row scrolls the
+  transcript to that turn; clicking a panel dot goes to that panelist's own answer. Display-only: it
+  renders from turns the client already has, and the transcript pane no longer yanks you to the bottom
+  while you read scrollback (it follows the bottom only if you were already there).
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.

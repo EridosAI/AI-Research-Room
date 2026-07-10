@@ -46,8 +46,12 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
 - Graph rendering has four knobs, all named at the top of the section: `OP_LANE` / `OP_MID` /
   `OP_FULL` (the three opacity registers — brightness *encodes* forward context, so nothing but a
   forward turn may be full-bright) and `CURVE_K` (Bézier handle length). No scattered literals.
-  Graph nodes must never carry class `turn` or `round`, and hit geometry (row rects, vertex circles)
-  stays a separate element from every drawn path.
+  Graph nodes must never carry class `turn` or `round`, and hit geometry (row rects, node circles)
+  stays a separate element from every drawn path — `.traj-node` is `pointer-events: none`.
+- The graph's rows are **logical, not per-turn**: `trajRows` collapses a round's raw panelist turns
+  onto one shared row (a blind concurrent panel is one event). Spacing runs on the row count. SVG has
+  no z-index, so document order *is* depth — the paint order (margin → lanes → fans → trajectory →
+  panel dots → vertices → hits) is load-bearing, not cosmetic.
 
 ## Deploy / run
 - `python -m web.server` → http://127.0.0.1:8765 (`--open` also launches a browser).

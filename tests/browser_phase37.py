@@ -53,6 +53,23 @@ def open_room(page, title):
     page.wait_for_function(f"document.querySelector('#title').textContent==={title!r}")
 
 
+# First document index of each graph layer. SVG has no z-index — document order is depth.
+PAINT_ORDER_JS = """() => {
+  const ch = [...document.querySelector('#traj-svg').children];
+  const first = (c) => ch.findIndex((e) => e.classList.contains(c));
+  return { conn: first('traj-connector'), lane: first('traj-lane'), fan: first('traj-fan-out'),
+           line: first('traj-line'), panel: first('traj-panel'), vertex: first('traj-vertex'),
+           hit: first('traj-hit') };
+}"""
+
+
+def endpoints(d):
+    """Start and end point of a swervePath `d` string, curved or straight."""
+    m = re.match(r"^M ([\d.]+) ([\d.]+) [LC] .*?([\d.]+) ([\d.]+)$", d)
+    assert m, f"unparseable path: {d}"
+    return (float(m.group(1)), float(m.group(2))), (float(m.group(3)), float(m.group(4)))
+
+
 def main():
     shutil.rmtree(HOME, ignore_errors=True)
     (HOME / "vault").mkdir(parents=True)
@@ -90,6 +107,13 @@ def main():
         _json(f"/rooms/{ya}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
         _json(f"/rooms/{ya}/run", "POST", {"mode": "yes_and", "prompt": "build on this",
                                            "seats": ["mock", "mock_cli"]})
+
+        # THREE panelists — enough lanes that "human strictly between" and "all dots share a row"
+        # are falsifiable, and enough that a per-turn row model would show a visible staircase.
+        f3 = _json("/rooms", "POST", {"title": "p37 fan3"})["room"]["id"]
+        _json(f"/rooms/{f3}", "PUT", {"participants": ["mock", "mock_cli", "mockthink"], "judge": "mock"})
+        _json(f"/rooms/{f3}/run", "POST", {"mode": "fusion", "prompt": "three ways",
+                                          "panel": ["mock", "mock_cli", "mockthink"], "judge": "mock"})
 
         # the other two panel modes, for the judge glyph (37.5B)
         sxs = _json("/rooms", "POST", {"title": "p37 sxs"})["room"]["id"]
@@ -192,7 +216,7 @@ def main():
 
             # ---- 37.3A: lanes = participants ∪ observed speakers ------------------
             lanes = page.evaluate("trajLanes()")
-            assert lanes == ["human", "mock", "ghost"], f"lane order/union wrong: {lanes}"
+            assert lanes == ["mock", "human", "ghost"], f"lane order/union wrong: {lanes}"
             ghost_fill = page.get_attribute('.traj-node[data-turn-id="ghost-turn-0001"]', "fill")
             assert ghost_fill.lower() == "#9aa3b2", f"departed speaker should be DOT_DEFAULT grey: {ghost_fill}"
             n_nodes = page.locator("#traj-svg .traj-node").count()
@@ -354,6 +378,74 @@ def main():
             assert page.eval_on_selector(".traj-hit", "el => el.tagName.toLowerCase()") == "rect"
             print("37.5D OK: lane changes are vertically-tangent Béziers; hit geometry stays separate")
 
+            # ================= 37.6 — logical rows + centred human lane ===========
+            open_room(page, "p37 fan3")
+            page.wait_for_selector("#traj-svg .traj-panel")
+            f3_turns = _json(f"/rooms/{f3}")["turns"]
+            f3_head = next(t for t in f3_turns if t["role"] == "human")
+            f3_judge = next(t for t in f3_turns if t["role"] == "judge")
+            f3_panels = [t for t in f3_turns if (t["meta"] or {}).get("is_panelist_raw")]
+            assert len(f3_panels) >= 2, f"the row-sharing check needs ≥2 panelists: {len(f3_panels)}"
+
+            # ---- 37.6A: the panel is one row, not a staircase ---------------------
+            cys = page.eval_on_selector_all("#traj-svg .traj-panel", "els => els.map(e => +e.getAttribute('cy'))")
+            assert len(cys) == len(f3_panels) and len(set(cys)) == 1, \
+                f"all {len(f3_panels)} panel dots must share one row: {cys}"
+            panel_y = cys[0]
+            assert page.locator("#traj-svg .traj-hit").count() == 3 < len(f3_turns), \
+                "a fusion round is three logical rows (prompt / panel band / judge), not one per turn"
+
+            # fan-out edges all arrive at that row; fan-in edges all leave it
+            outs = page.eval_on_selector_all("#traj-svg .traj-fan-out", "els => els.map(e => e.getAttribute('d'))")
+            ins = page.eval_on_selector_all("#traj-svg .traj-fan-in", "els => els.map(e => e.getAttribute('d'))")
+            assert len(outs) == len(ins) == len(f3_panels)
+            assert {endpoints(d)[1][1] for d in outs} == {panel_y}, "fan-out edges must all land on the panel row"
+            assert {endpoints(d)[0][1] for d in ins} == {panel_y}, "fan-in edges must all leave the panel row"
+            head_pts = {endpoints(d)[0] for d in outs}
+            assert len(head_pts) == 1, f"every fan-out leaves the one human vertex: {head_pts}"
+            print(f"37.6A OK: {len(f3_panels)} panelists share one row; the fan is simultaneous")
+
+            # ---- 37.6A: per-row hit geometry; dots stay per-turn targets ----------
+            row1 = page.get_attribute('.traj-hit[data-row="1"]', "data-turn-id")
+            assert row1 == f3_head["id"], f"a panel row's hit-rect jumps to the round's prompt: {row1}"
+            flashed = lambda: page.eval_on_selector_all(
+                "#stream .jump-flash", "els => els.map(e => e.dataset.turnId)")
+            for p in f3_panels[:2]:                       # two different dots, one row, two targets
+                page.click(f'.traj-hit-node[data-turn-id="{p["id"]}"]')
+                page.wait_for_timeout(120)
+                assert flashed() == [p["id"]], f"a panel dot must jump to its own turn: {flashed()} != {p['id']}"
+                page.wait_for_timeout(1150)               # let the flash expire before the next click
+            page.click('.traj-hit[data-row="1"]', position={"x": 4, "y": 6})   # off every lane
+            page.wait_for_timeout(120)
+            assert flashed() == [f3_head["id"]], f"the panel row-rect jumps to the prompt: {flashed()}"
+            print("37.6A OK: panel dots are distinct per-turn targets; the row-rect targets the prompt")
+
+            # ---- 37.6B: the human lane sits in the middle -------------------------
+            lanes3 = page.evaluate("trajLanes()")
+            models3 = [k for k in lanes3 if k != "human"]
+            assert len(models3) == 3, f"fixture needs 3 model lanes for 'between' to be falsifiable: {lanes3}"
+            assert lanes3.index("human") == len(models3) // 2 == 1, f"human at floor(n/2): {lanes3}"
+            xs = page.evaluate("""(keys) => Object.fromEntries(keys.map(k =>
+                 [k, +document.querySelector(`.traj-lane[data-lane="${k}"]`).getAttribute('x1')]))""", lanes3)
+            model_xs = [xs[k] for k in models3]
+            assert min(model_xs) < xs["human"] < max(model_xs), \
+                f"the human lane must sit strictly between the model lanes: {xs}"
+
+            # even model count → index floor(n/2) too
+            open_room(page, "p37 fusion")
+            page.wait_for_selector("#traj-svg .traj-node")
+            lanes2 = page.evaluate("trajLanes()")
+            models2 = [k for k in lanes2 if k != "human"]
+            assert len(models2) == 2 and lanes2.index("human") == len(models2) // 2 == 1, \
+                f"even model count: human at floor(n/2): {lanes2}"
+
+            # full paint order, back to front, on a room that has every layer
+            open_room(page, "p37 fan3")
+            page.wait_for_selector("#traj-svg .traj-panel")
+            o = page.evaluate(PAINT_ORDER_JS)
+            assert o["lane"] < o["fan"] < o["panel"] < o["vertex"] < o["hit"], f"paint order: {o}"
+            print(f"37.6B OK: human lane centred at index {lanes3.index('human')}; paint order back-to-front")
+
             # ---- 37.3E/F run in the TALL room: #stream must genuinely overflow, or every
             #      scroll assertion below is vacuously true (scrollTop clamps to 0 at maxScroll=0).
             open_room(page, "p37 tall")
@@ -476,7 +568,7 @@ def main():
               const c = document.querySelector('.traj-connector');
               const d = document.querySelector('.traj-margin-dot');
               const rail = document.querySelector('.traj-margin-rail');
-              const humanLane = document.querySelector('.traj-lane');   // human is drawn first
+              const humanLane = document.querySelector('.traj-lane[data-lane="human"]');
               return { tag: c.tagName.toLowerCase(),
                        y1: +c.getAttribute('y1'), y2: +c.getAttribute('y2'),
                        cx1: +c.getAttribute('x1'), cx2: +c.getAttribute('x2'),
@@ -492,7 +584,12 @@ def main():
                 f"the terminal dot sits on the human lane at the anchor row: {span}"
             assert span["dotFill"] == span["stroke"], \
                 f"the terminal dot takes the CONNECTOR's colour, not the human lane's: {span}"
-            print("37.5C OK: connector spans human lane → rail with a terminal dot in connector grey")
+            # With the human lane centred the connector crosses the right-half model lanes, so it
+            # must paint BEHIND them. SVG has no z-index: document order is depth.
+            order = page.evaluate(PAINT_ORDER_JS)
+            assert 0 <= order["conn"] < order["lane"], f"connectors must paint behind lane guides: {order}"
+            assert order["conn"] < order["vertex"] < order["hit"], f"paint order wrong: {order}"
+            print("37.5C OK: connector spans human lane → rail, terminal dot in connector grey, behind the lanes")
 
             # ---- 37.4B: rollback past the windowed rows → clamp or vanish, no crash ----
             before = len(_json(f"/rooms/{conv}")["turns"])
