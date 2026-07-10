@@ -219,6 +219,8 @@ function renderConverse(t) {
   if (t.meta && t.meta.kind === "file") return renderFileTurn(t);   // attached document (Phase 22)
   const div = document.createElement("div");
   div.className = "turn" + (t.role === "human" ? " human" : "");
+  div.dataset.turnId = t.id;                // graph jump anchor (Phase 37); stamped at BUILD time —
+                                            // render() tears #stream down on every streaming frame
   const isHuman = t.role === "human";
   const fromMargin = t.meta && t.meta.from_margin;
   const extra = (fromMargin ? "from margin" : "") || (t.meta && t.meta.model) || "";
@@ -517,7 +519,10 @@ function artifactControls(t) {
 function renderRound(b) {
   const div = document.createElement("div"); div.className = "round";
   if (b.prompt) {
+    // A round is a COMPOUND container: the graph anchors the prompt, each panel card and the
+    // synthesis separately — never the .round div, which spans ~6 turns (Phase 37).
     const pr = document.createElement("div"); pr.className = "prompt";
+    pr.dataset.turnId = b.prompt.id;
     // round provenance (Phase 27): the mode that ran + whether the panel saw the
     // conversation — read from the round-head turn's stamped selection.
     const sel = (b.prompt.meta && b.prompt.meta.selection) || {};
@@ -532,6 +537,7 @@ function renderRound(b) {
     for (const p of b.panels) {
       const c = colorOf(p.speaker);
       const card = document.createElement("div"); card.className = "panel";
+      card.dataset.turnId = p.id;
       const head = document.createElement("div"); head.className = "phead";
       head.appendChild(dot(c));
       const nm = document.createElement("span"); nm.className = "pname"; nm.style.color = c; nm.textContent = p.speaker; head.appendChild(nm);
@@ -571,6 +577,7 @@ function renderRound(b) {
   }
   if (b.judge) {
     const syn = document.createElement("div"); syn.className = "synthesis";
+    syn.dataset.turnId = b.judge.id;
     const n = b.panels.length;
     const ff = b.judge.meta && b.judge.meta.judge_fallback_from;
     // mode-aware label: synthesis (fusion) | map (mapping) | divergence (side-by-side)
@@ -585,13 +592,23 @@ function renderRound(b) {
   return div;
 }
 
+// Set by adoptRoom on a room SWITCH: a freshly opened room always lands at the bottom,
+// whatever the outgoing room's scroll position was.
+let _forcePin = false;
+
 function render() {
   $("#title").textContent = STATE.room ? STATE.room.title : "";
   $("#room-settings-btn").disabled = !STATE.room;
   $("#margin-toggle").disabled = !STATE.room;
   $("#rollback-btn").disabled = !STATE.room || !STATE.turns.length;
   renderModelBar();
-  const main = $("#stream"); main.innerHTML = "";
+  const main = $("#stream");
+  // Pin to the bottom only if we were ALREADY there (Phase 37). render() runs once per
+  // animation frame while a converse streams, so an unconditional pin yanks the reader back
+  // from scrollback mid-stream — and it would eat every graph jump.
+  const pin = _forcePin || main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
+  _forcePin = false;
+  main.innerHTML = "";
   if (!STATE.room) {
     main.innerHTML = '<div class="empty">No room yet. Click <b>+ new room</b> to start one.</div>';
     return;
@@ -606,8 +623,220 @@ function render() {
   for (const b of groupTurns(STATE.turns)) main.appendChild(b.type === "round" ? renderRound(b) : renderConverse(b.turn));
   if (STATE.pending) main.appendChild(renderPending(STATE.pending));       // optimistic user turn (Phase 31.3)
   if (STATE.streaming) main.appendChild(renderStreaming(STATE.streaming)); // live converse AI bubble (Phase 36.4)
-  main.scrollTop = main.scrollHeight;
+  if (pin) main.scrollTop = main.scrollHeight;
 }
+
+// ===== trajectory graph (Phase 37) ==========================================
+// A client-side mirror of the engine's forward view. The bright line traces exactly
+// what flows into the next model's context; raw panel answers hang off it as dim nodes.
+//
+// The predicate below is the ONE thing that must stay in step with the engine.
+// Canonical definition: engine/context.forward_turns. Four consumers today —
+//   engine/context.forward_turns  (canonical, feeds build_context + the margin window)
+//   engine/export_md._group       (the Obsidian export)
+//   groupTurns                    (this file — round grouping)
+//   isForwardTurn                 (this file — the trajectory line)
+// Change the semantics in one and you must change all four.
+function isForwardTurn(t) { return !(t.meta && t.meta.is_panelist_raw); }
+
+const TRAJ = { railW: 150, padX: 14, padTop: 12, padBottom: 12, minRowGap: 6, marginGap: 16 };
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+// Model output is untrusted everywhere, including here: text reaches the SVG only as the
+// textContent of a <title>, never as markup.
+function svgTitle(node, text) {
+  const t = document.createElementNS(SVGNS, "title");
+  t.textContent = text;
+  node.appendChild(t);
+  return node;
+}
+
+// Which lane a turn belongs to. Human turns (incl. attached files) share the human lane;
+// everything else — ai, judge, and promoted margin notes — sits on its speaker's lane.
+function laneOf(t) { return t.role === "human" ? "human" : t.speaker; }
+
+// human leftmost, then the room roster in order, then any speaker only the transcript knows
+// about: a departed seat, a judge who was never a panelist, a promoted margin model.
+function trajLanes() {
+  const lanes = ["human"];
+  for (const k of (STATE.room && STATE.room.participants) || []) if (!lanes.includes(k)) lanes.push(k);
+  for (const t of STATE.turns) { const k = laneOf(t); if (k && !lanes.includes(k)) lanes.push(k); }
+  return lanes;
+}
+
+// NEVER call this from render(): that path runs once per animation frame while a
+// converse streams (36.4). Drive it off committed-turn changes only — adoptRoom, the
+// toggle, a debounced resize, and marginSend's success path.
+function drawTrajGraph() {
+  const rail = $("#traj-rail");
+  const svg = $("#traj-svg");
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!STATE.ui.trajectory_open || !STATE.room || !STATE.turns.length) {
+    svg.setAttribute("height", "0");
+    return;
+  }
+  const n = STATE.turns.length;
+  const railH = Math.max(rail.clientHeight || 0, 120);
+  const gap = Math.max(TRAJ.minRowGap, (railH - TRAJ.padTop - TRAJ.padBottom) / (n + 1));
+  const height = Math.round(TRAJ.padTop + gap * n + TRAJ.padBottom);
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${TRAJ.railW} ${height}`);
+
+  const lanes = trajLanes();
+  const left = TRAJ.padX;
+  const marginX = TRAJ.railW - TRAJ.padX;               // the margin rail's column (37.4)
+  const right = Math.max(left, marginX - TRAJ.marginGap);
+  const laneX = (key) => {
+    const i = Math.max(0, lanes.indexOf(key));
+    return lanes.length < 2 ? left : left + (i * (right - left)) / (lanes.length - 1);
+  };
+  const rowY = (i) => TRAJ.padTop + gap * (i + 1);
+
+  drawTrajBody(svg, { n, gap, height, lanes, laneX, rowY, marginX });
+}
+
+function drawTrajBody(svg, geom) {
+  const { gap, height, lanes, laneX, rowY } = geom;
+
+  // lane guides — thin, solid, dot-coloured, well behind everything else
+  for (const key of lanes) {
+    svg.appendChild(svgTitle(svgEl("line", {
+      x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane",
+      stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": 0.3,
+    }), key));
+  }
+
+  // The bright line traces forward context exactly. Each segment is coloured by the turn
+  // it arrives at, so a swerve reads as the next speaker taking the floor.
+  let prev = null;
+  STATE.turns.forEach((t, i) => {
+    if (!isForwardTurn(t)) return;
+    const pt = { x: laneX(laneOf(t)), y: rowY(i) };
+    if (prev) {
+      svg.appendChild(svgEl("line", {
+        x1: prev.x, y1: prev.y, x2: pt.x, y2: pt.y, class: "traj-line",
+        stroke: colorOf(laneOf(t)), "stroke-width": 1.5, "stroke-linecap": "round",
+      }));
+    }
+    prev = pt;
+  });
+
+  // nodes: bright vertices on the line, dim nodes for the raw panel fan-out. A judge who
+  // also sat on the panel gets BOTH on its lane — the fan-out re-converging, by design.
+  STATE.turns.forEach((t, i) => {
+    const fwd = isForwardTurn(t);
+    const c = colorOf(laneOf(t));
+    const node = svgEl("circle", {
+      cx: laneX(laneOf(t)), cy: rowY(i), r: 2.5, fill: c,
+      "fill-opacity": fwd ? 1 : 0.35, class: "traj-node",
+      "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
+    });
+    svgTitle(node, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
+    svg.appendChild(node);
+  });
+
+  drawTrajMargin(svg, geom);   // 37.4 — connectors + brackets, drawn over the lanes
+
+  // full-width hit rects last so a click anywhere on a row lands, however thin the node
+  STATE.turns.forEach((t, i) => {
+    const hit = svgEl("rect", {
+      x: 0, y: rowY(i) - gap / 2, width: TRAJ.railW, height: Math.max(gap, 8),
+      class: "traj-hit", "data-turn-id": t.id,
+    });
+    svgTitle(hit, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
+    svg.appendChild(hit);
+  });
+}
+
+// The margin rail: the side-channel made visible. A margin question hangs a connector off
+// the main row it was asked beside, and brackets the forward turns it actually read.
+//
+// `meta.window_ids` (Phase 37.1) is the exact span, captured from the same snapshot the
+// margin's background was built from. Turns can be rolled back out from under those ids, so
+// every id is resolved against the CURRENT transcript and missing ones are simply dropped.
+//
+// Legacy margin turns predate window_ids and carry only the policy string. For those the row
+// is correlated by `ts` — which is second-granular and can over-include a turn appended by a
+// concurrent round. Good enough to point at; NOT good enough to bracket. So: no bracket.
+const BRACKET_CAP = 3;   // px the bracket overshoots its end rows, so last_1 still draws
+
+function drawTrajMargin(svg, geom) {
+  const { rowY, marginX, height } = geom;
+  const margins = STATE.marginTurns || [];
+  const promoted = STATE.turns.filter((t) => t.meta && t.meta.from_margin);
+  if (!margins.length && !promoted.length) return;
+
+  svg.appendChild(svgEl("line", {
+    x1: marginX, y1: 0, x2: marginX, y2: height, class: "traj-margin-rail",
+    stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.45,
+  }));
+
+  const rowOf = new Map();                       // turn id → row index, current transcript only
+  STATE.turns.forEach((t, i) => rowOf.set(t.id, i));
+  const forwardRows = STATE.turns.map((t, i) => (isForwardTurn(t) ? i : -1)).filter((i) => i >= 0);
+
+  const connector = (y, cls) => svgEl("line", {
+    x1: marginX, y1: y, x2: marginX - TRAJ.marginGap, y2: y, class: cls,
+    stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.4,
+  });
+
+  for (const q of margins) {
+    if (q.role !== "human") continue;            // one connector per QUESTION, not per answer
+    const meta = q.meta || {};
+    const ids = meta.window_ids;
+
+    if (Array.isArray(ids)) {
+      const rows = ids.map((id) => rowOf.get(id)).filter((r) => r !== undefined);
+      if (!rows.length) continue;                // every windowed turn was rolled back — draw nothing
+      const lo = Math.min(...rows), hi = Math.max(...rows);
+      const label = `margin (${meta.window || "window"}): ${(q.text || "").slice(0, 80)}`;
+      svg.appendChild(svgTitle(connector(rowY(hi), "traj-connector"), label));
+      // BRACKET_CAP encloses the windowed rows rather than ending on their centres — and it is
+      // what makes a single-row window (last_1) a visible tick instead of a zero-length line.
+      svg.appendChild(svgTitle(svgEl("line", {
+        x1: marginX, y1: rowY(lo) - BRACKET_CAP, x2: marginX, y2: rowY(hi) + BRACKET_CAP,
+        class: "traj-bracket", stroke: DOT_DEFAULT, "stroke-width": 2, "stroke-opacity": 0.6,
+      }), label));
+      continue;
+    }
+
+    // legacy: best-effort ts correlation, clamped into range. Never throws, never brackets.
+    const anchor = forwardRows.filter((i) => (STATE.turns[i].ts || "") <= (q.ts || "")).pop();
+    if (anchor === undefined) continue;
+    svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx"),
+      `margin (${meta.window || "window"}, approximate): ${(q.text || "").slice(0, 80)}`));
+  }
+
+  // the one deliberate margin → main backflow, drawn as a connector INTO the transcript
+  for (const t of promoted) {
+    const r = rowOf.get(t.id);
+    if (r === undefined) continue;
+    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted"),
+      `promoted from margin: ${(t.text || "").slice(0, 80)}`));
+  }
+}
+
+// Scroll the transcript to a turn and flash it. Instant, not smooth: no smooth scrolling
+// exists anywhere in the app and a graph click shouldn't be the first.
+function jumpToTurn(id) {
+  const node = document.querySelector(`#stream [data-turn-id="${CSS.escape(id)}"]`);
+  if (!node) return;                                   // rolled back, or not rendered
+  node.scrollIntoView({ block: "center" });
+  node.classList.remove("jump-flash");
+  void node.offsetWidth;                               // restart the animation on a repeat click
+  node.classList.add("jump-flash");
+  setTimeout(() => node.classList.remove("jump-flash"), 1200);
+}
+
+$("#traj-svg").addEventListener("click", (e) => {
+  const hit = e.target.closest("[data-turn-id]");
+  if (hit) jumpToTurn(hit.getAttribute("data-turn-id"));
+});
 
 // ===== composer pickers (scoped to the ACTIVE ROOM's roster) =================
 function roomRoster() { return (STATE.room && STATE.room.participants) || []; }
@@ -939,6 +1168,10 @@ function applyUI() {
   sb.style.width = (STATE.ui.sidebar_width || 260) + "px";
   sb.classList.toggle("collapsed", !!STATE.ui.sidebar_collapsed);
   $("#sidebar-expand").classList.toggle("hidden", !STATE.ui.sidebar_collapsed);
+  const trajOpen = !!STATE.ui.trajectory_open;
+  $("#traj-rail").classList.toggle("hidden", !trajOpen);
+  $("#traj-toggle").classList.toggle("active", trajOpen);
+  if (trajOpen) drawTrajGraph();          // the rail only has a size once it's shown
   applyComposerHeight();
   enforcePaneFit();   // sidebar collapse/expand changes workspace width → re-check coexistence (Phase 34.3)
 }
@@ -1020,6 +1253,7 @@ async function refreshRooms() {
 
 // ===== adopt / switch / new ==================================================
 function adoptRoom(view) {
+  _forcePin = !STATE.room || STATE.room.id !== view.id;   // a room SWITCH always lands at the bottom
   STATE.room = {
     id: view.id, title: view.title,
     participants: view.participants || [], judge: view.judge || null,
@@ -1036,6 +1270,7 @@ function adoptRoom(view) {
   // paints into another room (the stream keeps draining server-side as a background round). (36.4)
   if (STATE.streaming && STATE.streaming.roomId !== view.id) STATE.streaming = null;
   if (view.margin_turns !== undefined) STATE.marginTurns = view.margin_turns || [];
+  drawTrajGraph();   // the ONE authoritative committed-turn mutation point — never render()
   renderComposerPickers();
   render();
   renderMargin();                       // show THIS room's own margin
@@ -1184,6 +1419,7 @@ function renderStagedFiles() {
 function renderFileTurn(t) {
   const meta = t.meta || {};
   const div = el("div", "turn human file-turn");
+  div.dataset.turnId = t.id;                                        // graph jump anchor (Phase 37)
   const head = el("button", "file-turn-head");
   const caret = el("span", "file-turn-caret"); caret.textContent = "▸";
   const name = el("span", "file-turn-name"); name.textContent = "📎 " + (meta.filename || "file");
@@ -1286,7 +1522,8 @@ async function send() {
     //    keep the one-shot /run dispatch (panel/judge stay synchronous by design).
     setStatus(modeStatus(sel), true);
     STATE.pending = { text, ts: Date.now() };   // optimistic user bubble, painted this frame (Phase 31.3)
-    render();
+    _forcePin = true;   // sending is an explicit act: always show your own message, even from scrollback.
+    render();           // (the stream's later frames then follow the bottom — until you scroll away.)
     const data = mode === "converse"
       ? await streamConverse(roomId, sel)        // SSE: live AI bubble + Stop (Phase 36.4/36.5)
       : await api(`/rooms/${roomId}/run`, "POST", sel);
@@ -1610,6 +1847,7 @@ async function marginSend() {
     if (STATE.room && STATE.room.id === data.room_id) {
       STATE.marginTurns = data.margin_turns || [];
       renderMargin(); marginStatus("");
+      drawTrajGraph();   // POST /margin returns no room view, so nothing else redraws the rail
     }
   } catch (e) { marginStatus(`margin failed: ${e.message}`); }
 }
@@ -1641,6 +1879,9 @@ $("#file-input").addEventListener("change", (e) => { stageFiles(e.target.files);
     if (files && files.length) stageFiles(files);
   });
 })();
+// The rail lives outside .workspace, but showing it still shrinks .workspace's live width —
+// so applyUI()'s enforcePaneFit() re-check is what keeps the viewer/margin clamps honest.
+$("#traj-toggle").addEventListener("click", () => setUI({ trajectory_open: !STATE.ui.trajectory_open }));
 $("#margin-toggle").addEventListener("click", () => (STATE.marginOpen ? closeMargin() : openMargin()));
 $("#margin-close").addEventListener("click", closeMargin);
 $("#margin-send").addEventListener("click", marginSend);
@@ -1695,7 +1936,10 @@ $("#viewer-close").addEventListener("click", closeViewer);
 // window resize (debounced) → re-check coexistence; the sidebar toggle path re-checks via
 // applyUI, and the sidebar drag via its own mouseup (Phase 34.3).
 let _fitTimer = null;
-window.addEventListener("resize", () => { clearTimeout(_fitTimer); _fitTimer = setTimeout(enforcePaneFit, 150); });
+window.addEventListener("resize", () => {
+  clearTimeout(_fitTimer);
+  _fitTimer = setTimeout(() => { enforcePaneFit(); drawTrajGraph(); }, 150);   // row spacing tracks rail height
+});
 $("#input").addEventListener("keydown", (e) => {
   // Enter sends; Shift+Enter inserts a newline. isComposing guard: don't swallow
   // an IME candidate-commit (also pressed via Enter) as a send.

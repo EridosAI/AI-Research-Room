@@ -172,6 +172,16 @@ Two layers, cleanly split:
   The JSONL append is unchanged — streaming is a display channel only, so the turn still lands once,
   with full text + reasoning/usage/cost meta. Non-streaming seats (a CLI runner) show a working
   indicator and land in one step.
+- **Trajectory graph.** A toggleable rail (`graph`, top-right) draws the shape of the conversation:
+  one vertical lane per speaker (human leftmost, then the roster; colours are the speaker dots), and a
+  single bright line that visits each turn's lane in order. The bright line traces **forward context
+  exactly** — it is a client-side mirror of `forward_turns()`, so raw panel answers hang off it as
+  **dim nodes** and never touch it. That makes a fusion round legible at a glance: the line dips out to
+  the human, fans into the blind panel, and re-converges on the judge. A **margin rail** on the right
+  hangs a connector at the row each side-question was asked beside, bracketing the turns it actually
+  read. Clicking any row scrolls the transcript to that turn. Display-only: it renders from turns the
+  client already has, and the transcript pane no longer yanks you to the bottom while you read
+  scrollback (it follows the bottom only if you were already there).
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.
@@ -470,6 +480,8 @@ python tests/browser_phase35.py        # fast-path composer: disclosure + per-ro
 python tests/engine_phase36.py         # converse streaming: adapter SSE deltas + engine on_delta threading + abort
 python tests/route_phase36.py          # streaming SSE route: delta*→done, error event, reject non-converse
 python tests/browser_phase36.py        # live converse bubble grows + Stop (no ai turn) + room-switch detach
+python tests/engine_phase37.py         # margin window anchoring: window_ids == the snapshot, not a re-read
+python tests/browser_phase37.py        # trajectory rail: lanes, forward line vs dim panel, jump, margin brackets
 ```
 
 ## Environment

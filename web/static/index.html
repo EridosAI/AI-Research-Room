@@ -30,6 +30,13 @@
   <div id="model-popover" class="model-popover hidden"></div>
   <div id="turn-popover" class="model-popover hidden"></div>
 
+  <!-- trajectory graph (Phase 37): a body-level flex sibling, deliberately OUTSIDE
+       .workspace so workspaceWidth() excludes it and the Phase-34 pane clamps are
+       untouched — the same trick #sidebar already relies on. -->
+  <aside id="traj-rail" class="traj-rail hidden">
+    <svg id="traj-svg" class="traj-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  </aside>
+
   <div id="app" class="app">
     <header>
       <div class="hgroup">
@@ -37,6 +44,7 @@
       </div>
       <div class="controls">
         <button id="rollback-btn" title="undo the last round (removes its turns; recoverable)" disabled>↶ undo round</button>
+        <button id="traj-toggle" title="trajectory graph — the shape of the conversation">graph</button>
         <button id="margin-toggle" title="open the margin (side-channel)" disabled>margin</button>
         <button id="room-settings-btn" title="this room's models &amp; judge" disabled>models</button>
       </div>

@@ -1,0 +1,411 @@
+"""browser_phase37.py — the trajectory graph rail (Chromium).
+
+  37.2: the rail is a body-level sibling outside .workspace; the `graph` button toggles it;
+        `trajectory_open` round-trips ui.json and survives a hard reload (no localStorage).
+  37.3: lanes = participants ∪ observed speakers (a departed seat still gets a lane);
+        bright vertices for exactly the forward turns, dim nodes for exactly the
+        is_panelist_raw turns — incl. the judge-as-panelist dual-node lane; yes-and renders
+        as two ordinary bright converse vertices; data-turn-id on prompt/panel/synthesis/
+        converse nodes; clicking a graph row brings its turn into view; a scrolled-up
+        transcript survives a render() (no yank) while a room switch still lands at bottom.
+  37.4: margin connectors + brackets from window_ids; a legacy margin turn (policy string
+        only) gets a best-effort connector and NO bracket; rollback past windowed rows
+        clamps or drops the bracket without crashing.
+
+Run:  python tests/browser_phase37.py   (needs playwright + chromium)
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+REPO = Path(__file__).resolve().parents[1]
+PORT = 8847
+BASE = f"http://127.0.0.1:{PORT}"
+HOME = Path("/tmp/p37browser")
+
+
+def _json(path, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    hdr = {"Content-Type": "application/json"} if body is not None else {}
+    return json.loads(urllib.request.urlopen(urllib.request.Request(
+        BASE + path, data=data, headers=hdr, method=method), timeout=30).read() or "{}")
+
+
+def wait_up():
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(BASE + "/rooms", timeout=2); return
+        except Exception:
+            time.sleep(0.2)
+    raise SystemExit("server did not start")
+
+
+def open_room(page, title):
+    page.locator(f'.room-row:has-text("{title}")').click()
+    page.wait_for_function(f"document.querySelector('#title').textContent==={title!r}")
+
+
+def main():
+    shutil.rmtree(HOME, ignore_errors=True)
+    (HOME / "vault").mkdir(parents=True)
+    shutil.copy(REPO / "tests" / "config.toml", HOME / "config.toml")
+    env = {**os.environ,
+           "RESEARCH_ROOM_CONFIG": str(HOME / "config.toml"), "RESEARCH_ROOM_HOME": str(HOME),
+           "RESEARCH_ROOM_SECRETS": str(HOME / "secrets.json"), "RESEARCH_ROOM_VAULT": str(HOME / "vault"),
+           "RESEARCH_ROOM_UI": str(HOME / "ui.json"), "RESEARCH_ROOM_PORT": str(PORT)}
+    srv = subprocess.Popen([sys.executable, "-m", "web.server"], cwd=REPO, env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_up()
+        # All rooms are seeded BEFORE page.goto so the sidebar lists them. Every fixture is
+        # synthesized through the real API + mock providers — the vault has no yes-and,
+        # mapping or promoted-note example to lean on.
+        conv = _json("/rooms", "POST", {"title": "p37 conv"})["room"]["id"]
+        _json(f"/rooms/{conv}", "PUT", {"participants": ["mock"], "judge": "mock"})
+        for q in ("first question", "second question"):
+            _json(f"/rooms/{conv}/run", "POST", {"mode": "converse", "prompt": q, "target": "mock"})
+        # a departed speaker: a turn whose seat is in no roster and no registry (the deleted-provider
+        # case — 7 real rooms have one). Hand-appended: by construction it cannot be produced by the API.
+        ghost = {"id": "ghost-turn-0001", "ts": "2026-07-10T00:00:00Z", "mode": "converse",
+                 "role": "ai", "speaker": "ghost", "text": "a departed seat", "meta": {}}
+        with (HOME / "vault" / conv / "main.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(ghost) + "\n")
+
+        # fusion: judge is ALSO a panelist → the same lane carries a dim node and a bright vertex
+        fus = _json("/rooms", "POST", {"title": "p37 fusion"})["room"]["id"]
+        _json(f"/rooms/{fus}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        _json(f"/rooms/{fus}/run", "POST", {"mode": "fusion", "prompt": "fuse this",
+                                            "panel": ["mock", "mock_cli"], "judge": "mock"})
+
+        # yes-and: two sequential forward answers, stamped as ordinary converse turns
+        ya = _json("/rooms", "POST", {"title": "p37 yesand"})["room"]["id"]
+        _json(f"/rooms/{ya}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        _json(f"/rooms/{ya}/run", "POST", {"mode": "yes_and", "prompt": "build on this",
+                                           "seats": ["mock", "mock_cli"]})
+
+        # A genuinely TALL room. The scroll assertions below are only meaningful in a
+        # transcript that actually overflows #stream — a short one makes every scroll check
+        # vacuously true (scrollTop is pinned at 0 because maxScroll is 0).
+        # TWO of them: proving the room-switch force-pin needs the room you switch AWAY from to be
+        # scrolled up. Switching away from a SHORT room is trivially "at bottom", so it would pin
+        # anyway and the assertion could not tell the force-pin from its absence.
+        blob = "\n\n".join("lorem ipsum dolor sit amet " * 12 for _ in range(6))
+
+        def seed_tall(title, prefix):
+            rid = _json("/rooms", "POST", {"title": title})["room"]["id"]
+            _json(f"/rooms/{rid}", "PUT", {"participants": ["mock"], "judge": "mock"})
+            with (HOME / "vault" / rid / "main.jsonl").open("w", encoding="utf-8") as f:
+                for i in range(24):
+                    role, spk = ("human", "human") if i % 2 == 0 else ("ai", "mock")
+                    f.write(json.dumps({"id": f"{prefix}-{i:03d}", "ts": "2026-07-10T00:00:00Z",
+                                        "mode": "converse", "role": role, "speaker": spk,
+                                        "text": f"TURN{i}\n\n{blob}", "meta": {}}) + "\n")
+            return rid
+
+        tall = seed_tall("p37 tall", "tall")     # titles must not be substrings of one another:
+        seed_tall("p37 deep", "deep")            # the sidebar row locator matches on text
+        del tall
+
+        with sync_playwright() as p:
+            br = p.chromium.launch(); page = br.new_page(viewport={"width": 1600, "height": 900})
+            errs = []
+            page.on("pageerror", lambda e: errs.append(str(e)))   # a dangling id must never throw
+            page.goto(BASE + "/", wait_until="networkidle")
+            open_room(page, "p37 conv")
+
+            # ---- 37.2A: placement — outside .workspace, sibling of #app -------------
+            assert page.locator("#traj-rail").count() == 1, "rail missing"
+            placement = page.evaluate("""() => {
+              const r = document.querySelector('#traj-rail');
+              return { parent: r.parentElement.tagName.toLowerCase(),
+                       inWorkspace: !!r.closest('.workspace'),
+                       inStream: !!r.closest('#stream'),
+                       nextIsApp: r.nextElementSibling && r.nextElementSibling.id === 'app' };
+            }""")
+            assert placement["parent"] == "body", f"rail must be body-level: {placement}"
+            assert not placement["inWorkspace"], "rail must be OUTSIDE .workspace (Phase-34 clamp budget)"
+            assert not placement["inStream"], "rail must not be a #stream descendant"
+            assert placement["nextIsApp"], f"rail must sit between #sidebar and #app: {placement}"
+            print("37.2A OK: rail is a body-level sibling between #sidebar and #app")
+
+            # ---- 37.2B: toggle shows/hides + persists -------------------------------
+            assert page.locator("#traj-rail").is_hidden(), "rail should start hidden (default false)"
+            assert _json("/ui")["trajectory_open"] is False, "GET /ui must backfill trajectory_open=False"
+            page.click("#traj-toggle")
+            page.wait_for_selector("#traj-rail:not(.hidden)")
+            assert not page.locator("#traj-rail").is_hidden(), "toggle didn't show the rail"
+            page.wait_for_timeout(150)
+            assert _json("/ui")["trajectory_open"] is True, "trajectory_open not persisted to ui.json"
+            page.click("#traj-toggle")
+            page.wait_for_timeout(150)
+            assert page.locator("#traj-rail").is_hidden(), "toggle didn't hide the rail"
+            assert _json("/ui")["trajectory_open"] is False, "close not persisted"
+            print("37.2B OK: graph button toggles the rail; state round-trips ui.json")
+
+            # ---- 37.2C: survives a hard reload, no localStorage ---------------------
+            page.click("#traj-toggle")
+            page.wait_for_selector("#traj-rail:not(.hidden)")
+            page.wait_for_timeout(150)
+            assert page.evaluate("window.localStorage.length") == 0, "localStorage used (forbidden)"
+            page.reload(wait_until="networkidle")
+            assert not page.locator("#traj-rail").is_hidden(), "rail did not survive a hard reload"
+            assert page.evaluate("window.localStorage.length") == 0, "localStorage populated after reload"
+            # the silent-revert trap: _UI_DEFAULT must carry the key, not just UIBody
+            raw = json.loads((HOME / "ui.json").read_text())
+            assert raw.get("trajectory_open") is True, f"ui.json did not store the key: {raw}"
+            print("37.2C OK: trajectory_open reconstructs from ui.json after a hard reload")
+
+            # ================= 37.3 — the graph ==================================
+            open_room(page, "p37 conv")
+            page.wait_for_selector("#traj-svg .traj-node")
+
+            # ---- 37.3A: lanes = participants ∪ observed speakers ------------------
+            lanes = page.evaluate("trajLanes()")
+            assert lanes == ["human", "mock", "ghost"], f"lane order/union wrong: {lanes}"
+            ghost_fill = page.get_attribute('.traj-node[data-turn-id="ghost-turn-0001"]', "fill")
+            assert ghost_fill.lower() == "#9aa3b2", f"departed speaker should be DOT_DEFAULT grey: {ghost_fill}"
+            n_nodes = page.locator("#traj-svg .traj-node").count()
+            n_turns = len(_json(f"/rooms/{conv}")["turns"])
+            assert n_nodes == n_turns, f"one node per turn: {n_nodes} vs {n_turns}"
+            assert page.locator("#traj-svg .traj-lane").count() == 3, "one lane guide per speaker"
+            assert page.locator("#traj-svg .traj-line").count() == n_turns - 1, \
+                "the bright line joins every forward turn"
+            print(f"37.3A OK: lanes {lanes} (departed seat kept, grey); one node per turn")
+
+            # ---- 37.3B: bright = forward, dim = is_panelist_raw -------------------
+            open_room(page, "p37 fusion")
+            page.wait_for_selector("#traj-svg .traj-node")
+            fus_turns = _json(f"/rooms/{fus}")["turns"]
+            fwd_ids = {t["id"] for t in fus_turns if not (t["meta"] or {}).get("is_panelist_raw")}
+            raw_ids = {t["id"] for t in fus_turns if (t["meta"] or {}).get("is_panelist_raw")}
+            assert raw_ids, "fixture produced no raw panelist turns"
+            got_fwd = set(page.eval_on_selector_all(
+                '.traj-node[data-forward="1"]', "els => els.map(e => e.dataset.turnId)"))
+            got_dim = set(page.eval_on_selector_all(
+                '.traj-node[data-forward="0"]', "els => els.map(e => e.dataset.turnId)"))
+            assert got_fwd == fwd_ids, f"bright vertices != forward turns\n{got_fwd}\n{fwd_ids}"
+            assert got_dim == raw_ids, f"dim nodes != is_panelist_raw turns\n{got_dim}\n{raw_ids}"
+            dim_op = page.get_attribute('.traj-node[data-forward="0"]', "fill-opacity")
+            assert float(dim_op) < 0.5, f"dim nodes should be dim: {dim_op}"
+
+            # the judge is also a panelist → its lane carries BOTH a dim node and a bright vertex
+            judge = next(t for t in fus_turns if t["role"] == "judge")
+            raw_same_lane = [t for t in fus_turns
+                             if (t["meta"] or {}).get("is_panelist_raw") and t["speaker"] == judge["speaker"]]
+            assert raw_same_lane, "fixture must have the judge also sit on the panel"
+            xs = page.evaluate(
+                """([a, b]) => [a, b].map(id =>
+                     document.querySelector(`.traj-node[data-turn-id="${id}"]`).getAttribute('cx'))""",
+                [judge["id"], raw_same_lane[0]["id"]])
+            assert xs[0] == xs[1], f"judge + its own raw answer must share a lane: {xs}"
+            print("37.3B OK: bright == forward, dim == raw panel; judge-as-panelist shares one lane")
+
+            # ---- 37.3C: yes-and = two ordinary bright converse vertices -----------
+            open_room(page, "p37 yesand")
+            page.wait_for_selector("#traj-svg .traj-node")
+            ya_turns = _json(f"/rooms/{ya}")["turns"]
+            ai = [t for t in ya_turns if t["role"] == "ai"]
+            assert len(ai) == 2 and {t["speaker"] for t in ai} == {"mock", "mock_cli"}, \
+                f"yes-and fixture wrong: {[(t['role'], t['speaker']) for t in ya_turns]}"
+            assert all(t["mode"] == "converse" and "round_id" not in (t["meta"] or {}) for t in ai), \
+                "yes-and answers should be converse-shaped (no round_id)"
+            assert page.locator('.traj-node[data-forward="0"]').count() == 0, "yes-and has no dim nodes"
+            assert page.locator('.traj-node[data-forward="1"]').count() == len(ya_turns), \
+                "every yes-and turn is a bright vertex"
+            print("37.3C OK: yes-and draws as two ordinary bright converse vertices")
+
+            # ---- 37.3D: data-turn-id on prompt / panel / synthesis / converse -----
+            open_room(page, "p37 fusion")
+            page.wait_for_selector(".round .prompt")
+            assert page.locator(".round").count() == 1
+            assert page.locator(".round[data-turn-id]").count() == 0, "the .round container must NOT be anchored"
+            assert page.locator(".round .prompt[data-turn-id]").count() == 1, "prompt not anchored"
+            assert page.locator(".round .panel[data-turn-id]").count() == len(raw_ids), "panels not anchored"
+            assert page.locator(".round .synthesis[data-turn-id]").count() == 1, "synthesis not anchored"
+            open_room(page, "p37 conv")
+            page.wait_for_selector("#stream .turn")
+            assert page.locator("#stream .turn[data-turn-id]").count() == n_turns, "converse turns not anchored"
+            print("37.3D OK: data-turn-id on prompt/panel/synthesis/converse, never on .round")
+
+            # ---- 37.3E/F run in the TALL room: #stream must genuinely overflow, or every
+            #      scroll assertion below is vacuously true (scrollTop clamps to 0 at maxScroll=0).
+            open_room(page, "p37 tall")
+            page.wait_for_selector("#traj-svg .traj-node")
+            geom = page.eval_on_selector("#stream", "el => ({max: el.scrollHeight - el.clientHeight})")
+            assert geom["max"] > 500, f"the scroll fixture must overflow #stream, else the test proves nothing: {geom}"
+            bottom_of = lambda: page.eval_on_selector("#stream", "el => el.scrollTop")
+            at_bottom = lambda: page.eval_on_selector(
+                "#stream", "el => el.scrollTop + el.clientHeight >= el.scrollHeight - 40")
+
+            # ---- 37.3E: click a graph row → the transcript actually MOVES there ----
+            page.eval_on_selector("#stream", "el => el.scrollTop = el.scrollHeight")
+            page.wait_for_timeout(80)
+            assert bottom_of() > 500, "precondition: start genuinely at the bottom"
+            page.click('.traj-hit[data-turn-id="tall-000"]')
+            page.wait_for_timeout(250)
+            moved = bottom_of()
+            assert moved < 200, f"clicking the first row must scroll back up, not sit at the bottom: {moved}"
+            visible = page.evaluate("""(id) => {
+              const el = document.querySelector(`#stream [data-turn-id="${id}"]`);
+              const s = document.querySelector('#stream');
+              const a = el.getBoundingClientRect(), b = s.getBoundingClientRect();
+              return a.bottom > b.top && a.top < b.bottom;
+            }""", "tall-000")
+            assert visible, "clicking a graph row did not bring its turn into view"
+            # …and a middle row lands in the middle, not at either end
+            page.click('.traj-hit[data-turn-id="tall-012"]')
+            page.wait_for_timeout(250)
+            mid = bottom_of()
+            assert 200 < mid < geom["max"] - 200, f"a middle row should land mid-transcript: {mid}"
+            print("37.3E OK: clicking a graph row scrolls the transcript to that turn")
+
+            # ---- 37.3F: the pin is conditional AND position-preserving -------------
+            # This must fail for BOTH the old unconditional pin (→ bottom) and a naive
+            # rebuild that drops scrollTop (→ 0). Only "leave it exactly where it was" passes.
+            page.eval_on_selector("#stream", "el => el.scrollTop = 800")
+            page.wait_for_timeout(60)
+            page.evaluate("render()")
+            page.wait_for_timeout(60)
+            kept = bottom_of()
+            assert abs(kept - 800) < 5, \
+                f"render() must preserve a mid-scroll reading position exactly (800), got {kept}"
+            assert not at_bottom(), "render() pinned a scrolled-up reader to the bottom"
+
+            # at the bottom, render() still follows (this is what a streaming frame relies on)
+            page.eval_on_selector("#stream", "el => el.scrollTop = el.scrollHeight")
+            page.wait_for_timeout(60)
+            page.evaluate("render()")
+            page.wait_for_timeout(60)
+            assert at_bottom(), "render() must keep following the bottom for a reader who is at it"
+
+            # A room SWITCH force-pins, even when leaving a scrolled-up view. render() decides the
+            # pin from the OUTGOING transcript's scroll state, so the room we leave must itself be
+            # tall and scrolled up — otherwise "at bottom" is trivially true and pins regardless.
+            page.eval_on_selector("#stream", "el => el.scrollTop = 0")
+            page.wait_for_timeout(60)
+            open_room(page, "p37 deep")
+            page.wait_for_timeout(150)
+            assert page.eval_on_selector("#stream", "el => el.scrollHeight - el.clientHeight") > 500, \
+                "the room switched INTO must also overflow, else at_bottom is vacuous"
+            assert at_bottom() and bottom_of() > 500, \
+                f"a room switch must force-pin to the bottom, got scrollTop={bottom_of()}"
+            open_room(page, "p37 tall")
+            page.wait_for_timeout(150)
+
+            # …and sending from scrollback still shows you your own message. Without send()'s
+            # force-pin, scrollTop would stay at 0 through the optimistic paint, every streaming
+            # frame and the final adopt — so the end state discriminates.
+            page.eval_on_selector("#stream", "el => el.scrollTop = 0")
+            page.wait_for_timeout(60)
+            page.fill("#input", "sent from scrollback")
+            page.press("#input", "Enter")
+            page.wait_for_selector('#stream .turn.human:has-text("sent from scrollback")', timeout=20000)
+            page.wait_for_selector(".turn.pending", state="detached", timeout=20000)
+            page.wait_for_selector(".turn.streaming", state="detached", timeout=20000)
+            page.wait_for_timeout(150)
+            assert at_bottom() and bottom_of() > 500, \
+                f"sending while scrolled up must pin to your own new message, got {bottom_of()}"
+            print("37.3F OK: render() preserves scrollback exactly; bottom follows; switch + send force-pin")
+
+            # ================= 37.4 — margin rail ================================
+            # ---- 37.4A: ask the margin (last_1) → connector + bracket on the last forward row,
+            #             WITHOUT leaving the room (proves the marginSend redraw hook) ----
+            open_room(page, "p37 conv")
+            page.wait_for_selector("#traj-svg .traj-node")
+            assert page.locator("#traj-svg .traj-margin-rail").count() == 0, "no margin yet → no rail"
+            page.click("#margin-toggle")
+            page.wait_for_selector("#margin:not(.hidden)")
+            page.select_option("#margin-model", "mock")
+            page.select_option("#margin-window", "last_1")
+            page.fill("#margin-input", "a side question")
+            page.click("#margin-send")
+            # attached, not visible: an SVG <line> has a zero-width bounding box by definition
+            page.wait_for_selector("#traj-svg .traj-bracket", state="attached", timeout=15000)
+            assert page.locator("#traj-svg .traj-margin-rail").count() == 1, "margin rail missing"
+            assert page.locator("#traj-svg .traj-connector").count() == 1, "one connector per question"
+            assert page.locator("#traj-svg .traj-approx").count() == 0, "window_ids present → not approximate"
+
+            turns = _json(f"/rooms/{conv}")["turns"]
+            mturns = _json(f"/rooms/{conv}")["margin_turns"]
+            q = next(t for t in mturns if t["role"] == "human")
+            assert q["meta"]["window_ids"] == [turns[-1]["id"]], \
+                f"last_1 should window exactly the last forward turn: {q['meta']}"
+            # last_1 → a one-row bracket straddling the last row; the connector lands on it
+            geo = page.evaluate("""() => {
+              const b = document.querySelector('.traj-bracket');
+              const c = document.querySelector('.traj-connector');
+              const n = document.querySelectorAll('.traj-node');
+              const last = n[n.length - 1];
+              return { y1: +b.getAttribute('y1'), y2: +b.getAttribute('y2'),
+                       cy: +c.getAttribute('y1'), lastRow: +last.getAttribute('cy') };
+            }""")
+            assert geo["cy"] == geo["lastRow"], f"connector must land on the last forward row: {geo}"
+            assert geo["y1"] < geo["lastRow"] < geo["y2"], f"bracket must straddle its row: {geo}"
+            assert geo["y2"] - geo["y1"] == 6, f"a last_1 bracket is a 6px tick, not a zero-length line: {geo}"
+            print("37.4A OK: margin connector + bracket appear live, anchored by window_ids")
+
+            # ---- 37.4B: rollback past the windowed rows → clamp or vanish, no crash ----
+            before = len(_json(f"/rooms/{conv}")["turns"])
+            page.on("dialog", lambda d: d.accept())     # the rollback confirm()
+            page.click("#rollback-btn")
+            page.wait_for_function("!document.querySelector('#banner').classList.contains('hidden')")
+            after = _json(f"/rooms/{conv}")["turns"]
+            assert len(after) < before, "rollback removed nothing"
+            # the windowed turn is gone, but the margin turn survives (margin.jsonl is never truncated)
+            assert q["meta"]["window_ids"][0] not in {t["id"] for t in after}, "windowed row should be gone"
+            assert len(_json(f"/rooms/{conv}")["margin_turns"]) == len(mturns), "rollback must not touch the margin"
+            assert page.locator("#traj-svg .traj-margin-rail").count() == 1, "the margin rail still stands"
+            assert page.locator("#traj-svg .traj-bracket").count() == 0, \
+                "every windowed id dangles → the bracket must vanish, not point off the end"
+            assert page.locator("#traj-svg .traj-connector").count() == 0, "a dangling connector must not be drawn"
+            assert page.locator("#traj-svg .traj-node").count() == len(after), "graph didn't re-derive after rollback"
+            assert not errs, f"a dangling window_id threw: {errs}"
+            print("37.4B OK: rollback past the window drops the bracket, no crash, graph re-derives")
+
+            br.close()
+
+        # ---- 37.4C: a LEGACY margin turn (policy string, no window_ids) ------------
+        # Hand-written: by construction the engine can no longer produce one.
+        legacy = _json("/rooms", "POST", {"title": "p37 legacy"})["room"]["id"]
+        _json(f"/rooms/{legacy}", "PUT", {"participants": ["mock"], "judge": "mock"})
+        _json(f"/rooms/{legacy}/run", "POST", {"mode": "converse", "prompt": "hello", "target": "mock"})
+        lturns = _json(f"/rooms/{legacy}")["turns"]
+        late = max(t["ts"] for t in lturns)
+        with (HOME / "vault" / legacy / "margin.jsonl").open("w", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "legacy-q", "ts": late, "mode": "margin", "role": "human",
+                                "speaker": "human", "text": "old style", "meta": {"window": "last_3"}}) + "\n")
+            f.write(json.dumps({"id": "legacy-a", "ts": late, "mode": "margin", "role": "ai",
+                                "speaker": "mock", "text": "old answer", "meta": {"model": "mock-1"}}) + "\n")
+        with sync_playwright() as p:
+            br = p.chromium.launch(); page = br.new_page(viewport={"width": 1600, "height": 900})
+            errs = []
+            page.on("pageerror", lambda e: errs.append(str(e)))
+            page.goto(BASE + "/", wait_until="networkidle")
+            open_room(page, "p37 legacy")
+            page.wait_for_selector("#traj-svg .traj-node")
+            assert page.locator("#traj-svg .traj-margin-rail").count() == 1, "legacy margin still gets a rail"
+            assert page.locator("#traj-svg .traj-connector.traj-approx").count() == 1, \
+                "legacy margin should get one best-effort connector"
+            assert page.locator("#traj-svg .traj-bracket").count() == 0, \
+                "a legacy (policy-string) margin must NOT be bracketed — the ts rule can over-include"
+            title = page.eval_on_selector(".traj-approx title", "el => el.textContent")
+            assert "approximate" in title, f"the approximation should be admitted in the title: {title!r}"
+            assert not errs, f"page errors on the legacy path: {errs}"
+            print("37.4C OK: legacy margin → best-effort connector, no bracket, no crash")
+            br.close()
+        print("\nPHASE 37 (trajectory graph): ALL CHECKS PASS")
+    finally:
+        srv.terminate()
+        try: srv.wait(timeout=5)
+        except Exception: srv.kill()
+
+
+if __name__ == "__main__":
+    main()

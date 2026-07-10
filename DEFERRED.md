@@ -293,6 +293,36 @@ Three deliberate "not yet"s:
   means threading `on_delta` into the judge round of `run_mode` + a second streaming route shape (the
   panel completes non-streamed, THEN the judge streams), not the clean single-call converse path.
 
+## Trajectory graph (Phase 37)
+
+- **Bracket overlap layout.** Two margin questions with overlapping windows draw two brackets on the
+  same rail column; they overdraw. Harmless (same meaning, same stroke) but it hides how many calls
+  read a given span. A nudge/stagger (or a per-bracket x-offset) waits until real margin use produces
+  dense overlapping windows — the shape of the fix depends on how they actually cluster.
+- **Viewport band / two-way scroll sync.** The rail is a map you can click, but it doesn't show *where
+  you are*: no band marking the visible transcript rows, and scrolling the transcript doesn't move
+  anything on the rail. Needs a scroll listener on `#stream` (there is none today) or an
+  IntersectionObserver — the latter must be re-registered on every `render()`, which rebuilds `#stream`
+  on every streaming frame. Deferred until the map is used enough to want the "you are here".
+- **Hover labels beyond the native `<title>`.** Each node's tooltip is the browser's native `<title>`
+  (speaker + the first 80 chars). A real label — a per-turn *summary* — is the old roadmap dependency
+  ("summary infra"); it's the same utility that would feed a summary bar and seed compaction. Optional,
+  and deliberately not a blocker.
+- **The graph as a second producer of the mode-selection object.** `run_mode`'s docstring has always
+  anticipated this: drag on the rail to shape the *next* round (who answers, who judges) instead of
+  using the composer dropdown. The selection object is already decoupled from execution, so this is a
+  new producer, not a new execution path. Its own phase.
+- **Distinct yes-and pair marking.** Yes-and writes two ordinary forward `converse` turns with no
+  `round_id` and no marker on the turns themselves — the mode name survives only in the round-head's
+  `meta.selection.mode`, which is **absent on pre-Phase-27 rooms**. v1 therefore draws the pair as what
+  it is forward-wise: two bright vertices. Marking the pair (a brace, a shared tint) means tolerating
+  "unknown" on old rooms.
+- **Legacy margin brackets.** Margin questions written before Phase 37.1 carry only the `window` policy
+  string, not `window_ids`. They get a best-effort `ts`-correlated connector and **no bracket**, because
+  `ts` is second-granular and the margin deliberately runs under its own lock — a concurrent main append
+  in the same second can be wrongly attributed. Backfilling `window_ids` for old margin turns is not
+  possible (the snapshot is gone); re-deriving them would bake in exactly that error.
+
 ## Next up (not deferred, just not started)
 
 - **Packaging / installable.** The whole point of settling the surface first: package this

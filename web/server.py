@@ -158,8 +158,12 @@ class RoomUpdate(BaseModel):
 
 
 class UIBody(BaseModel):
+    # A key must be added HERE *and* to _UI_DEFAULT: unknown fields are dropped at parse
+    # time (pydantic `extra="ignore"`), and GET only backfills what _UI_DEFAULT knows — so
+    # a half-registered key round-trips in-session and silently reverts on reload.
     sidebar_collapsed: bool | None = None
     sidebar_width: float | None = None
+    trajectory_open: bool | None = None   # trajectory graph rail visible (Phase 37)
     composer_height: float | None = None   # dragged transcript↔composer split (px)
     export_dir: str | None = None   # Obsidian export folder; "" = off
     accent_hue: float | None = None   # theme accent hue (oklch degrees)
@@ -370,7 +374,8 @@ _UI_DEFAULT = {"sidebar_collapsed": False, "sidebar_width": 260, "composer_heigh
                "accent_hue": 233,            # navy default
                "theme_mode": "dark",         # dark (default) | light | system
                "text_brightness": "default", "font_scale": "default", "display_name": "",
-               "show_token_estimate": True, "show_model_pct": False, "artifacts_dir": ""}
+               "show_token_estimate": True, "show_model_pct": False, "artifacts_dir": "",
+               "trajectory_open": False}
 
 
 def _load_ui() -> dict:

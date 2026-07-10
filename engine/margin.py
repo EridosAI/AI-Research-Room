@@ -30,13 +30,21 @@ def _system(model: str) -> str:
     )
 
 
-def windowed_background(main_turns: list[dict], window: str) -> str:
-    """Synthesis-only filtered main, then the last-N logical turns (or all)."""
+def windowed_forward(main_turns: list[dict], window: str) -> list[dict]:
+    """Synthesis-only filtered main, then the last-N logical turns (or all).
+
+    Returns the turns themselves, not their text, so a caller can record WHICH
+    turns the window resolved to (Phase 37) from the same snapshot it formats."""
     fwd = context.forward_turns(main_turns)
     n = WINDOWS.get(window, WINDOWS["last_3"])
     if n is not None:
         fwd = fwd[-n:]
-    return context.format_turns(fwd)
+    return fwd
+
+
+def windowed_background(main_turns: list[dict], window: str) -> str:
+    """The windowed forward slice, flattened for a prompt."""
+    return context.format_turns(windowed_forward(main_turns, window))
 
 
 def margin_turn(room_id: str, prompt: str, window: str = "last_3",
@@ -51,7 +59,12 @@ def margin_turn(room_id: str, prompt: str, window: str = "last_3",
     providers.provider(model)   # validate; raises ValueError if unknown
 
     mpath = rooms.margin_path(room_id)
-    background = windowed_background(transcript.load(rooms.main_path(room_id)), window)
+    # ONE snapshot of main: the ids stamped below are the ids of the very turns
+    # formatted into the background. Re-reading main to recover them would race a
+    # concurrent round (the margin runs under its own lock, by design) and a
+    # second-granular ts cannot break the tie — so never re-read, capture here.
+    window_slice = windowed_forward(transcript.load(rooms.main_path(room_id)), window)
+    background = context.format_turns(window_slice)
     side = context.format_turns(transcript.load(mpath))
     body = ("=== BACKGROUND (main transcript) ===\n" + (background or "(empty)\n")
             + "\n=== SIDE CONVERSATION ===\n" + (side or "(none yet)\n")
@@ -59,8 +72,14 @@ def margin_turn(room_id: str, prompt: str, window: str = "last_3",
     payload = {"system": _system(model),
                "messages": [{"role": "user", "content": body}]}
 
+    # `window` (the policy string) stays for back-compat; `window_ids` is the exact
+    # resolved span, so the UI can anchor a margin call to the main turns it read
+    # instead of correlating timestamps. Display-only: margin.jsonl never enters
+    # build_context, so this adds nothing to any model's forward view.
+    qmeta = {"window": window,
+             "window_ids": [t["id"] for t in window_slice if t.get("id")]}
     transcript.append(transcript.make_turn(
-        "margin", "human", "human", prompt, {"window": window}), mpath)
+        "margin", "human", "human", prompt, qmeta), mpath)
     reply = providers.call_model(model, payload, tools=False)
     meta = {"model": providers.provider(model).model}
     if reply.reasoning:
