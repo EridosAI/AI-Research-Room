@@ -639,14 +639,17 @@ function render() {
 // Change the semantics in one and you must change all four.
 function isForwardTurn(t) { return !(t.meta && t.meta.is_panelist_raw); }
 
-const TRAJ = { railW: 150, padX: 14, padTop: 12, padBottom: 12, minRowGap: 6, marginGap: 16 };
+const TRAJ = { railW: 150, padX: 14, marginGap: 16 };
+const VISIBLE_ROWS = 12;  // fixed scale (38.3): ROW_H = rail height / 12; the rail scrolls
+const FUTURE_ROWS = 5;    // the future zone below the live edge
 
-// The three opacity registers. Brightness encodes context: full-bright touches ONLY forward
-// turns; the panel fan sits at the mid register (clearly above the lane guides, clearly below
-// the trajectory); the guides are the faintest thing on the rail. Single knobs — no literals.
+// The opacity registers. Brightness encodes context: full-bright touches ONLY forward turns;
+// the panel fan sits at the mid register (clearly above the lane guides, clearly below the
+// trajectory); the guides are the faintest thing on the rail. Single knobs — no literals.
 const OP_LANE = 0.30;    // lane guides
 const OP_MID = 0.55;     // fan edges + raw panelist dots
 const OP_FULL = 1.0;     // the trajectory and its vertices
+const OP_GHOST = 0.25;   // the default-future ghost: what send would do right now
 const CURVE_K = 0.45;    // Bézier handle length, as a fraction of the segment's dy
 const OP_HOVER_DIM = 0.6; // hover: everything OUTSIDE the hovered round/call drops to 0.6×
 
@@ -744,12 +747,13 @@ function drawTrajGraph() {
     svg.setAttribute("height", "0");
     return;
   }
-  // Spacing runs on the LOGICAL row count, so a big round compresses vertically instead of
-  // sprawling into a staircase of panelists.
+  // FIXED scale (38.3): ROW_H = visible height / 12, however long the transcript — the rail
+  // scrolls rather than compressing. Rows stay LOGICAL (a panel is one row). Below the live
+  // edge sits a FUTURE_ROWS-deep zone the ghosts (and 38.4's paint) draw into.
   const { rowOf, rows } = trajRows(STATE.turns);
   const railH = Math.max(rail.clientHeight || 0, 120);
-  const gap = Math.max(TRAJ.minRowGap, (railH - TRAJ.padTop - TRAJ.padBottom) / (rows + 1));
-  const height = Math.round(TRAJ.padTop + gap * rows + TRAJ.padBottom);
+  const gap = railH / VISIBLE_ROWS;
+  const height = Math.round((rows + FUTURE_ROWS) * gap);
   svg.setAttribute("height", String(height));
   svg.setAttribute("viewBox", `0 0 ${TRAJ.railW} ${height}`);
 
@@ -761,9 +765,14 @@ function drawTrajGraph() {
     const i = Math.max(0, lanes.indexOf(key));
     return lanes.length < 2 ? left : left + (i * (right - left)) / (lanes.length - 1);
   };
-  const rowY = (r) => TRAJ.padTop + gap * (r + 1);
+  const rowY = (r) => (r + 0.5) * gap;                  // future rows are rowY(rows), rowY(rows+1), …
 
+  // Pin-to-live-edge mirrors the transcript's conditional rule (37.3) exactly: pinned if at
+  // the edge before the redraw, position preserved otherwise, a room switch force-pins.
+  // _forcePin is read-only here — render() still owns clearing it.
+  const atEdge = rail.scrollTop + rail.clientHeight >= rail.scrollHeight - 40;
   drawTrajBody(svg, { gap, height, lanes, laneX, rowY, rowOf, rows, marginX });
+  if (_forcePin || atEdge) rail.scrollTop = rail.scrollHeight;
 }
 
 // A vertex. The judge carries the round's KIND in its shape — the one cheap signal that tells
@@ -813,13 +822,19 @@ function drawTrajBody(svg, geom) {
   geom.marginIds = [];
   drawTrajMargin(svg, geom);   // furthest back: it passes beneath everything it crosses
 
-  // lane guides — thin, solid, dot-coloured
+  // lane guides — thin, solid, dot-coloured; they run on through the future zone
   for (const key of lanes) {
     svg.appendChild(svgTitle(svgEl("line", {
       x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane traj-dimmable",
       "data-lane": key, stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": OP_LANE,
     }), key));
   }
+
+  // the NOW boundary: everything above happened; everything below is the ghost's territory
+  svg.appendChild(svgEl("line", {
+    x1: 0, y1: rows * gap, x2: TRAJ.railW, y2: rows * gap, class: "traj-now traj-dimmable",
+    stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.15,
+  }));
 
   // The fan: head → every surviving panelist → judge. ORIGIN colour, as everywhere else (37.7):
   // a stroke carries the voice of whoever just spoke, so the fan-out spreads in the asker's
@@ -901,6 +916,8 @@ function drawTrajBody(svg, geom) {
   drawNodes(false);            // dim panel dots
   drawNodes(true);             // bright vertices
 
+  trajGhost(svg, geom);        // 38.3 — the future zone previews the current composer state
+
   // One full-width hit rect per LOGICAL row, on top, so a click anywhere on a row lands however
   // thin the node. A panel row spans several turns, so its rect jumps to the round's prompt —
   // the one unambiguous target; the dots stay the precise per-turn targets.
@@ -963,6 +980,68 @@ function trajHoverRules(svg, rounds, marginIds) {
   const style = document.createElementNS(SVGNS, "style");
   style.textContent = rules.join("\n");
   svg.appendChild(style);
+}
+
+// The engine resolves an "auto" addressee to the last AI speaker (modes.py:356-359, via
+// transcript.last_ai_speaker), falling back to the room's first participant. The ghost mirrors
+// that resolution so the default future is shown honestly, never as a blank.
+function lastAiSpeaker() {
+  for (let i = STATE.turns.length - 1; i >= 0; i--) {
+    const t = STATE.turns[i];
+    if (t.role === "ai" || t.role === "judge") return t.speaker;
+  }
+  return null;
+}
+
+// The default-future ghost (38.3): with nothing painted, the future zone shows what SEND would
+// do right now — the compiled selection, rendered from the same controls buildSelection reads.
+// Hollow rings for the would-be vertices, solid strokes at the ghost register; origin-coloured
+// like everything else (the first hop is the prompt you are about to speak: human-voiced).
+function trajGhost(svg, geom) {
+  const { lanes, laneX, rowY, rowOf, rows } = geom;
+  let last = -1;
+  STATE.turns.forEach((t, i) => { if (isForwardTurn(t)) last = i; });
+  if (last < 0) return;
+  const t0 = STATE.turns[last];
+  const x0 = laneX(laneOf(t0)), y0 = rowY(rowOf.get(t0.id));
+  const fy = (k) => rowY(rows - 1 + k);                 // future row k = 1..FUTURE_ROWS
+
+  const edge = (xa, ya, xb, yb, color) => svg.appendChild(swerve(xa, ya, xb, yb, {
+    class: "traj-ghost traj-ghost-edge traj-dimmable", stroke: color,
+    "stroke-width": 1, "stroke-opacity": OP_GHOST,
+  }));
+  const ring = (lane, k) => svg.appendChild(svgEl("circle", {
+    cx: laneX(lane), cy: fy(k), r: 2.8, fill: "none", stroke: colorOf(lane),
+    "stroke-width": 1.5, "stroke-opacity": OP_GHOST,
+    class: "traj-ghost traj-ghost-node traj-dimmable", "data-lane": lane, "data-frow": k,
+  }));
+
+  const mode = currentMode();
+  if (mode === "converse") {
+    const target = $("#addressee").value || lastAiSpeaker() || ((STATE.room.participants || [])[0]);
+    if (!target || !lanes.includes(target)) return;
+    edge(x0, y0, laneX(target), fy(1), colorOf("human"));
+    ring(target, 1);
+    return;
+  }
+  if (mode === "fusion" || mode === "mapping" || mode === "side_by_side") {
+    const members = (mode === "side_by_side" ? pickedSeats() : pickedPanel()).filter((m) => lanes.includes(m));
+    const judge = $(mode === "side_by_side" ? "#sxs-judge" : "#judge-pick").value;
+    for (const m of members) {
+      edge(x0, y0, laneX(m), fy(1), colorOf("human"));
+      ring(m, 1);
+      if (judge && lanes.includes(judge)) edge(laneX(m), fy(1), laneX(judge), fy(2), colorOf(m));
+    }
+    if (members.length && judge && lanes.includes(judge)) ring(judge, 2);
+    return;
+  }
+  if (mode === "yes_and") {
+    const a = $("#ya-a").value, b = $("#ya-b").value;
+    if (!a || !b || !lanes.includes(a) || !lanes.includes(b)) return;
+    edge(x0, y0, laneX(a), fy(1), colorOf("human")); ring(a, 1);
+    edge(laneX(a), fy(1), laneX(b), fy(2), colorOf(a)); ring(b, 2);
+    edge(laneX(b), fy(2), laneX("human"), fy(3), colorOf(b)); ring("human", 3);
+  }
 }
 
 // The margin rail: the side-channel made visible. A margin question hangs a connector off
@@ -1919,6 +1998,7 @@ function restoreRoomComposer() {
   const sel = $("#addressee");
   sel.value = [...sel.options].some((o) => o.value === want) ? want : "";
   setAdvanced(mode !== "converse");   // auto-expand non-converse so active machinery is visible
+  drawTrajGraph();                    // restored composer state moves the ghost too (38.3)
 }
 
 // ===== room settings (per-room roster + judge) ===============================
@@ -2207,7 +2287,12 @@ $("#mode").addEventListener("change", () => {
   // reveal the machinery you just chose — a non-converse mode's controls must be visible,
   // not just active (Phase 35.1/35.3). Manual collapse (the toggle) still works after.
   if (currentMode() !== "converse") setAdvanced(true); else updateModeChip();
+  drawTrajGraph();   // the default-future ghost previews the selection this compiles to (38.3)
 });
+// Any composer-state change moves the ghost: the addressee, and every control inside the
+// disclosure (panel boxes, judges, seats — change events bubble to the container).
+$("#addressee").addEventListener("change", drawTrajGraph);
+$("#composer-advanced").addEventListener("change", drawTrajGraph);
 $("#mode-toggle").addEventListener("click", () => setAdvanced(!STATE.advancedOpen));  // open/close the disclosure
 $("#new-room-btn").addEventListener("click", newRoom);
 $("#room-settings-btn").addEventListener("click", openRoomSettings);

@@ -89,6 +89,19 @@ def main():
         ans = next(t for t in mt["margin_turns"] if t["role"] == "ai")
         _json(f"/rooms/{nr}/margin/{ans['id']}/promote", "POST")
 
+        # a tall room for the fixed-scale + scroll-pin + ghost checks. The LAST ai speaker is
+        # mock_cli while participants[0] is mock — so "auto resolves to the last AI speaker"
+        # is falsifiable against "auto resolves to the first participant".
+        tall = _json("/rooms", "POST", {"title": "p38 tall"})["room"]["id"]
+        _json(f"/rooms/{tall}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        with (HOME / "vault" / tall / "main.jsonl").open("w", encoding="utf-8") as f:
+            for i in range(24):
+                role = "human" if i % 2 == 0 else "ai"
+                spk = "human" if role == "human" else ("mock_cli" if i == 23 else "mock")
+                f.write(json.dumps({"id": f"tl-{i:03d}", "ts": f"2026-07-10T00:{i:02d}:00Z",
+                                    "mode": "converse", "role": role, "speaker": spk,
+                                    "text": f"turn {i}", "meta": {}}) + "\n")
+
         # yes-and SHAPE without selection (a pre-Phase-27 transcript): renders unmarked
         old = _json("/rooms", "POST", {"title": "p38 old"})["room"]["id"]
         _json(f"/rooms/{old}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
@@ -192,6 +205,85 @@ def main():
             assert page.locator("#traj-svg .traj-halo").count() == 0, \
                 "a selection-less yes-and SHAPE renders unmarked (pre-Phase-27 rooms)"
             print("38.2B OK: promoted-note adjacency and selection-less shape both stay unmarked")
+
+            # ================= 38.3 — fixed scale, future zone, ghost ==============
+            open_room(page, "p38 tall")
+            page.wait_for_selector("#traj-svg .traj-hit")
+            rail_h = page.eval_on_selector("#traj-rail", "el => el.clientHeight")
+            row_h = rail_h / 12
+
+            # ---- 38.3A: geometry — ROW_H = h/12, +5 future rows, hairline, lanes run on ----
+            n_rows = page.locator("#traj-svg .traj-hit").count()
+            assert n_rows == 24, f"24 forward turns = 24 logical rows: {n_rows}"
+            svg_h = float(page.get_attribute("#traj-svg", "height"))
+            assert abs(svg_h - (24 + 5) * row_h) <= 1, f"svg height must be (rows+5)×ROW_H: {svg_h}"
+            ys = page.evaluate("""() => ['0','1'].map(r =>
+                 +document.querySelector(`.traj-hit[data-row="${r}"]`).getAttribute('y'))""")
+            assert abs((ys[1] - ys[0]) - row_h) < 0.6, f"row pitch must be clientHeight/12: {ys}, {row_h}"
+            now_y = float(page.get_attribute(".traj-now", "y1"))
+            assert abs(now_y - 24 * row_h) < 0.6, f"the hairline sits at the live edge: {now_y}"
+            lane_y2 = float(page.get_attribute(".traj-lane", "y2"))
+            assert abs(lane_y2 - svg_h) < 1, "lane guides must run through the future zone"
+            print("38.3A OK: fixed ROW_H = h/12; 5 future rows; hairline at the live edge")
+
+            # ---- 38.3B: the rail's scroll-pin mirrors the transcript rule ----------
+            geom_max = page.eval_on_selector("#traj-rail", "el => el.scrollHeight - el.clientHeight")
+            assert geom_max > 200, f"the tall fixture must make the rail scroll: {geom_max}"
+            page.eval_on_selector("#traj-rail", "el => el.scrollTop = el.scrollHeight")
+            page.evaluate("drawTrajGraph()")
+            assert page.eval_on_selector(
+                "#traj-rail", "el => el.scrollTop + el.clientHeight >= el.scrollHeight - 40"), \
+                "at the live edge, a redraw must keep following it"
+            page.eval_on_selector("#traj-rail", "el => el.scrollTop = 150")
+            page.evaluate("drawTrajGraph()")
+            kept = page.eval_on_selector("#traj-rail", "el => el.scrollTop")
+            assert abs(kept - 150) < 5, f"a mid-scroll rail position must be preserved: {kept}"
+            page.eval_on_selector("#traj-rail", "el => el.scrollTop = 0")
+            open_room(page, "p38 fusion")
+            open_room(page, "p38 tall")
+            page.wait_for_timeout(150)
+            assert page.eval_on_selector(
+                "#traj-rail", "el => el.scrollTop + el.clientHeight >= el.scrollHeight - 40"), \
+                "a room switch must force-pin the rail to the live edge"
+            print("38.3B OK: rail pin — edge follows, mid-scroll preserved, switch force-pins")
+
+            # ---- 38.3C: converse default ghost, auto AND explicit ------------------
+            # auto: resolves to the actual last AI speaker (mock_cli), NOT participants[0] (mock)
+            assert page.eval_on_selector("#addressee", "el => el.value") == "", "fixture: addressee is auto"
+            ghost = page.locator("#traj-svg .traj-ghost-node")
+            assert ghost.count() == 1, f"converse ghosts exactly one ring: {ghost.count()}"
+            assert page.get_attribute(".traj-ghost-node", "data-lane") == "mock_cli", \
+                "auto must resolve to the LAST AI speaker, not the first participant"
+            assert page.get_attribute(".traj-ghost-node", "data-frow") == "1"
+            assert page.get_attribute(".traj-ghost-node", "fill") == "none", "ghost vertices are hollow rings"
+            assert page.get_attribute(".traj-ghost-node", "stroke-opacity") == "0.25"
+            cy = float(page.get_attribute(".traj-ghost-node", "cy"))
+            assert abs(cy - 24.5 * row_h) < 0.6, f"the ghost lands on the first future row: {cy}"
+            assert page.locator("#traj-svg .traj-ghost-edge").count() == 1, "one ghost swerve from the live edge"
+            # explicit addressee: the ghost moves with the picker
+            page.select_option("#addressee", "mock")
+            page.wait_for_timeout(80)
+            assert page.get_attribute(".traj-ghost-node", "data-lane") == "mock", \
+                "the ghost must follow an explicit addressee"
+            page.select_option("#addressee", "")
+            print("38.3C OK: converse ghost — auto resolves to the last AI speaker; explicit follows")
+
+            # ---- 38.3D: panel-mode default ghost = the full default fan -------------
+            page.click("#mode-toggle")                 # #mode lives inside the disclosure (Phase 35)
+            page.wait_for_selector("#composer-advanced:not(.hidden)")
+            page.select_option("#mode", "fusion")
+            page.wait_for_timeout(100)
+            rings = page.eval_on_selector_all(
+                "#traj-svg .traj-ghost-node", "els => els.map(e => [e.dataset.lane, e.dataset.frow])")
+            assert sorted(rings) == [["mock", "1"], ["mock", "2"], ["mock_cli", "1"]], \
+                f"fusion default ghost: both panelists at +1, the room judge at +2: {rings}"
+            assert page.locator("#traj-svg .traj-ghost-edge").count() == 4, \
+                "2 ghost fan-outs + 2 ghost fan-ins"
+            page.select_option("#mode", "converse")
+            page.wait_for_timeout(80)
+            assert page.locator("#traj-svg .traj-ghost-node").count() == 1, \
+                "switching the picker back re-derives the converse ghost (state, not gesture)"
+            print("38.3D OK: fusion default ghost fans to the panel and converges on the room judge")
 
             assert not errs, f"page errors: {errs}"
             br.close()
