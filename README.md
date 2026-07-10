@@ -52,8 +52,8 @@ Two layers, cleanly split:
   - **Yes-and** — A answers, then B builds on A ("yes, and") seeing A via forward context.
 
   A single `#mode` selector reveals each mode's params contextually and dispatches a **mode-selection
-  object** to one `/run` endpoint — selection is decoupled from execution (a future trajectory-graph
-  is a second producer of the same object). Panel modes carry a **blind/transcript toggle** ("panel
+  object** to one `/run` endpoint — selection is decoupled from execution (the trajectory graph's
+  **paint-to-compose** layer is the second producer of the same object, exactly as anticipated). Panel modes carry a **blind/transcript toggle** ("panel
   sees conversation" — panelists may read room history but stay independent of each other), and each
   judge turn shows a **mode-aware label** (Synthesis / Map / Divergence). The invariant holds by
   construction: a round's `instruction` is a prompt-modifier (never serialized forward), and `ai-raw`
@@ -186,9 +186,20 @@ Two layers, cleanly split:
   circle for fusion's *synthesis*, a ring for side-by-side's *divergence*, a diamond for a *map*. A
   **margin rail** on the right runs a connector from your lane across to the rail at the row each
   side-question was asked beside, bracketing the turns it actually read. Clicking a row scrolls the
-  transcript to that turn; clicking a panel dot goes to that panelist's own answer. Display-only: it
-  renders from turns the client already has, and the transcript pane no longer yanks you to the bottom
-  while you read scrollback (it follows the bottom only if you were already there).
+  transcript to that turn; clicking a panel dot goes to that panelist's own answer; hovering a round
+  raises its whole fan and dims everything else, and a **yes-and** hand-off glows — a halo under the
+  A→B segment, two voices in one motion. The rail runs at a **fixed scale** (twelve rows visible,
+  scrolling with the same follow-the-bottom rule as the transcript) and past the live edge keeps a
+  five-row **future zone**: a ghost of what send would do *right now*, rendered from the composer's
+  own state — including an auto addressee resolved honestly to the last AI speaker. And the future is
+  **paintable**: clicking lane intersections composes the next round — one dot is a converse, dots
+  plus a judge dot are a panel round whose mode you cycle through the judge's own glyph (filled →
+  ring → diamond → off), and a human dot at the end flips A-then-B from "panel of one, judged by B"
+  to "B builds on A" (yes-and). Paint writes the **same selection state** the composer picker edits —
+  one state, two editors; a pattern that doesn't compile renders bare and changes nothing. Clicking
+  the margin rail's future column opens the margin pane, ready to ask sideways. It all renders from
+  turns the client already has, and the transcript pane no longer yanks you to the bottom while you
+  read scrollback (it follows the bottom only if you were already there).
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.
@@ -489,6 +500,7 @@ python tests/route_phase36.py          # streaming SSE route: delta*→done, err
 python tests/browser_phase36.py        # live converse bubble grows + Stop (no ai turn) + room-switch detach
 python tests/engine_phase37.py         # margin window anchoring: window_ids == the snapshot, not a re-read
 python tests/browser_phase37.py        # trajectory rail: lanes, forward line vs dim panel, jump, margin brackets
+python tests/browser_phase38.py        # rail interaction: hover raise, yes-and halo, fixed scale + ghost, paint-to-compose
 ```
 
 ## Environment

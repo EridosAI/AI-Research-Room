@@ -17,7 +17,7 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
 - **Browser tests** → `python3 tests/browser_*.py` (the **system** python3, which has Playwright +
   Chromium). Running these under `.venv` fails with `ModuleNotFoundError: playwright`.
 - Each test spins its own server on a private port against `tests/config.toml` (mock providers) —
-  zero token cost. Current suite: **23 engine/route + 33 browser = 56, all green.**
+  zero token cost. Current suite: **23 engine/route + 34 browser = 57, all green.**
 - **A scroll assertion needs a transcript that actually overflows `#stream`.** With a short fixture
   `maxScroll == 0`, so `scrollTop` is always 0 and every scroll check passes vacuously — a real
   Phase-37 review catch. `browser_phase37.py` seeds two tall rooms and asserts the overflow first.
@@ -42,12 +42,20 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
   the semantics in one and you must change all four.
 - **Never call `drawTrajGraph()` from `render()`** — `render()` runs once per animation frame while a
   converse streams. Drive the graph off `adoptRoom` (the single committed-turn mutation point), the
-  toggle, a debounced resize, and `marginSend` (which returns no room view, so nothing else redraws).
-- Graph rendering has four knobs, all named at the top of the section: `OP_LANE` / `OP_MID` /
-  `OP_FULL` (the three opacity registers — brightness *encodes* forward context, so nothing but a
-  forward turn may be full-bright) and `CURVE_K` (Bézier handle length). No scattered literals.
-  Graph nodes must never carry class `turn` or `round`, and hit geometry (row rects, node circles)
-  stays a separate element from every drawn path — `.traj-node` is `pointer-events: none`.
+  toggle, a debounced resize, `marginSend` (which returns no room view, so nothing else redraws), and
+  composer-state changes (mode / addressee / disclosure controls — the future ghost re-derives; 38.3).
+- Graph rendering's knobs are all named at the top of the section: `OP_LANE` / `OP_MID` / `OP_FULL` /
+  `OP_GHOST` (the opacity registers — brightness *encodes* forward context, so nothing but a forward
+  turn may be full-bright), `OP_HOVER_DIM`, and `CURVE_K` (Bézier handle length). No scattered
+  literals. Graph nodes must never carry class `turn` or `round`, and hit geometry (row rects, node
+  circles, future intersections) stays a separate element from every drawn path — `.traj-node` and
+  `.traj-ghost` are `pointer-events: none`.
+- **Paint-to-compose (38.4) has no second store.** The future dots are a VIEW over the composer's
+  selection state: a compiling paint writes the SAME DOM controls the picker edits and goes through
+  the `#mode` change dispatch (chip, disclosure, redraw). `STATE.paintDots` is non-null ONLY while
+  the painted pattern does NOT compile — the bare overlay (dots, no strokes, composer untouched); it
+  clears on send, on room switch, and on any picker change. Never render a compiled pattern from the
+  gesture, and never make the overlay sticky.
 - The graph's rows are **logical, not per-turn**: `trajRows` collapses a round's raw panelist turns
   onto one shared row (a blind concurrent panel is one event). Spacing runs on the row count. SVG has
   no z-index, so document order *is* depth — the paint order (margin → lanes → fans → trajectory →
@@ -63,7 +71,14 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
   double-launch on that port; `sudo systemctl restart fusion` to pick up code changes.
 
 ## Current state (2026-07)
-- **Latest:** Phase 37 — the **trajectory graph** (a toggleable SVG rail, `graph` button). Its one
+- **Latest:** Phase 38 — the graph's **interaction layer**: hover raises a round's whole fan (one
+  attribute on the SVG root + draw-time CSS rules — no per-element style mutation), yes-and hand-offs
+  halo (keyed on `meta.selection.mode`, never topology), the rail runs at a **fixed scale** (12
+  visible rows, scrolls with the transcript's conditional pin rule) with a 5-row **future zone**
+  ghosting what send would do right now, and the future is **paintable** — dots compile to the same
+  mode-selection object the composer dispatches (38.4; grammar + judge-glyph cycle + human-dot
+  discriminator). Zero engine changes.
+- Phase 37 — the **trajectory graph** (a toggleable SVG rail, `graph` button). Its one
   engine edit: `margin_turn` stamps `meta.window_ids` on the margin *question* turn — the exact
   forward turns its window read, captured from the same snapshot as the background. That retired a
   cross-file `ts` correlation that was unsound (the margin runs under its own lock **by design**, and

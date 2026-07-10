@@ -41,6 +41,9 @@ let STATE = {
   roomModes: {},             // room_id -> session interaction mode (Phase 35.2); default converse
   roomAddressees: {},        // room_id -> session addressee (Phase 35.2); default auto (last AI)
   advancedOpen: false,       // is the composer's mode disclosure open? (Phase 35.1)
+  paintDots: null,           // 38.4: non-null ONLY while a painted future pattern does NOT
+                             // compile — the bare overlay. A compiling paint is written into
+                             // the composer controls instead; state stays the single truth.
 };
 
 // ===== theme mode (dark / light / system) ===================================
@@ -953,6 +956,24 @@ function drawTrajBody(svg, geom) {
     svg.appendChild(hit);
   });
 
+  // Future-zone hit geometry (38.4): a paint target at every lane × future-row intersection,
+  // plus the margin rail's future column — asking sideways is also a next step. None carry
+  // data-turn-id, so the click handler's jump branch never sees them.
+  const paintR = Math.max(5, hitR);
+  for (let k = 1; k <= FUTURE_ROWS; k++) {
+    for (const key of lanes) {
+      const hit = svgEl("circle", { cx: laneX(key), cy: rowY(rows - 1 + k), r: paintR,
+                                    class: "traj-hit-future", "data-lane": key, "data-frow": k });
+      svgTitle(hit, `paint: ${key} at +${k}`);
+      svg.appendChild(hit);
+    }
+  }
+  const marginFut = svgEl("rect", { x: geom.marginX - 6, y: rows * gap, width: 12,
+                                    height: height - rows * gap, class: "traj-hit-future",
+                                    "data-margin-rail": "1" });
+  svgTitle(marginFut, "ask in the margin");
+  svg.appendChild(marginFut);
+
   // margin hit geometry last (drawTrajMargin painted its strokes FIRST — the very back), so
   // hovering a connector or bracket works even though the strokes themselves sit under rows
   for (const m of geom.marginHits) { svg.appendChild(m); }
@@ -997,6 +1018,42 @@ function lastAiSpeaker() {
 // do right now — the compiled selection, rendered from the same controls buildSelection reads.
 // Hollow rings for the would-be vertices, solid strokes at the ghost register; origin-coloured
 // like everything else (the first hop is the prompt you are about to speak: human-voiced).
+//
+// 38.4 makes the future zone an EDITOR too. The dots are a VIEW over the composer's selection
+// state, compiled in both directions: a pattern that compiles is written INTO the composer
+// controls and the dots re-derive from state (STATE.paintDots stays null — state is the only
+// truth); a pattern that does not compile renders bare from STATE.paintDots — dots, no
+// strokes — and the composer keeps the last valid state.
+
+// One ghost vertex. Plain = a hollow ring. A judge wears its round-kind GLYPH (the 37.5B
+// language doubling as the paint cycle's read-back): filled = synthesis, double ring =
+// divergence, diamond = map. A yes-and second dot stays plain — the glyph is precisely what
+// discriminates "B judges A" from "B builds on A".
+function ghostNode(svg, geom, lane, frow, kind) {
+  const x = geom.laneX(lane), y = geom.rowY(geom.rows - 1 + frow);
+  const c = colorOf(lane);
+  const base = { "data-lane": lane, "data-frow": frow,
+                 class: `traj-ghost traj-ghost-node traj-dimmable${kind ? " traj-ghost-judge" : ""}` };
+  if (kind) base["data-kind"] = kind;
+  if (kind === "synthesis") {
+    svg.appendChild(svgEl("circle", { cx: x, cy: y, r: 3, fill: c, "fill-opacity": OP_GHOST, ...base }));
+  } else if (kind === "divergence") {   // two voices left standing side by side
+    svg.appendChild(svgEl("circle", { cx: x, cy: y, r: 3.8, fill: "none", stroke: c,
+                                      "stroke-width": 1.2, "stroke-opacity": OP_GHOST, ...base }));
+    svg.appendChild(svgEl("circle", { cx: x, cy: y, r: 1.6, fill: "none", stroke: c,
+                                      "stroke-width": 1.2, "stroke-opacity": OP_GHOST,
+                                      class: "traj-ghost traj-ghost-pip traj-dimmable" }));
+  } else if (kind === "map") {
+    const r = 3.4;
+    svg.appendChild(svgEl("polygon", { points: `${x},${y - r} ${x + r},${y} ${x},${y + r} ${x - r},${y}`,
+                                       fill: "none", stroke: c, "stroke-width": 1.5,
+                                       "stroke-opacity": OP_GHOST, ...base }));
+  } else {
+    svg.appendChild(svgEl("circle", { cx: x, cy: y, r: 2.8, fill: "none", stroke: c,
+                                      "stroke-width": 1.5, "stroke-opacity": OP_GHOST, ...base }));
+  }
+}
+
 function trajGhost(svg, geom) {
   const { lanes, laneX, rowY, rowOf, rows } = geom;
   let last = -1;
@@ -1006,14 +1063,18 @@ function trajGhost(svg, geom) {
   const x0 = laneX(laneOf(t0)), y0 = rowY(rowOf.get(t0.id));
   const fy = (k) => rowY(rows - 1 + k);                 // future row k = 1..FUTURE_ROWS
 
+  // A non-compiling paint renders exactly as painted, and NOTHING connects — the graph must
+  // not pretend a pattern runs when send would in fact do something else.
+  if (STATE.paintDots) {
+    for (const d of STATE.paintDots) {
+      if (lanes.includes(d.lane)) ghostNode(svg, geom, d.lane, d.frow, d.kind || null);
+    }
+    return;
+  }
+
   const edge = (xa, ya, xb, yb, color) => svg.appendChild(swerve(xa, ya, xb, yb, {
     class: "traj-ghost traj-ghost-edge traj-dimmable", stroke: color,
     "stroke-width": 1, "stroke-opacity": OP_GHOST,
-  }));
-  const ring = (lane, k) => svg.appendChild(svgEl("circle", {
-    cx: laneX(lane), cy: fy(k), r: 2.8, fill: "none", stroke: colorOf(lane),
-    "stroke-width": 1.5, "stroke-opacity": OP_GHOST,
-    class: "traj-ghost traj-ghost-node traj-dimmable", "data-lane": lane, "data-frow": k,
   }));
 
   const mode = currentMode();
@@ -1021,7 +1082,7 @@ function trajGhost(svg, geom) {
     const target = $("#addressee").value || lastAiSpeaker() || ((STATE.room.participants || [])[0]);
     if (!target || !lanes.includes(target)) return;
     edge(x0, y0, laneX(target), fy(1), colorOf("human"));
-    ring(target, 1);
+    ghostNode(svg, geom, target, 1, null);
     return;
   }
   if (mode === "fusion" || mode === "mapping" || mode === "side_by_side") {
@@ -1029,19 +1090,122 @@ function trajGhost(svg, geom) {
     const judge = $(mode === "side_by_side" ? "#sxs-judge" : "#judge-pick").value;
     for (const m of members) {
       edge(x0, y0, laneX(m), fy(1), colorOf("human"));
-      ring(m, 1);
+      ghostNode(svg, geom, m, 1, null);
       if (judge && lanes.includes(judge)) edge(laneX(m), fy(1), laneX(judge), fy(2), colorOf(m));
     }
-    if (members.length && judge && lanes.includes(judge)) ring(judge, 2);
+    if (members.length && judge && lanes.includes(judge)) {
+      ghostNode(svg, geom, judge, 2,
+                mode === "side_by_side" ? "divergence" : mode === "mapping" ? "map" : "synthesis");
+    }
     return;
   }
   if (mode === "yes_and") {
     const a = $("#ya-a").value, b = $("#ya-b").value;
     if (!a || !b || !lanes.includes(a) || !lanes.includes(b)) return;
-    edge(x0, y0, laneX(a), fy(1), colorOf("human")); ring(a, 1);
-    edge(laneX(a), fy(1), laneX(b), fy(2), colorOf(a)); ring(b, 2);
-    edge(laneX(b), fy(2), laneX("human"), fy(3), colorOf(b)); ring("human", 3);
+    edge(x0, y0, laneX(a), fy(1), colorOf("human")); ghostNode(svg, geom, a, 1, null);
+    edge(laneX(a), fy(1), laneX(b), fy(2), colorOf(a)); ghostNode(svg, geom, b, 2, null);
+    edge(laneX(b), fy(2), laneX("human"), fy(3), colorOf(b)); ghostNode(svg, geom, "human", 3, null);
   }
+}
+
+// ---- paint-to-compose (38.4) ------------------------------------------------
+// The grammar. Row +1 = who answers. A single KINDED dot at +2 is the judge, and its glyph IS
+// the mode: synthesis → fusion, divergence → side-by-side (which demands exactly two seats),
+// map → mapping. A human dot at +3 is the yes-and discriminator: with it, +1 is A and +2 is B
+// building on A; without it, the same two dots read as a one-panelist round judged by B.
+// Everything else — human dots off +3, model dots at +3, anything past +3, a judge with no
+// panel, several dots at +2, a lane the roster can't express — does not compile. Returns the
+// compiled selection, {noop: true} for an empty pattern (= the composer as it stands), or null.
+function compilePaint(dots) {
+  if (!dots.length) return { noop: true };
+  const roster = roomRoster();
+  const r1 = dots.filter((d) => d.frow === 1), r2 = dots.filter((d) => d.frow === 2);
+  const r3 = dots.filter((d) => d.frow === 3);
+  if (dots.some((d) => d.frow > 3)) return null;
+  if ([...r1, ...r2].some((d) => d.lane === "human" || !roster.includes(d.lane))) return null;
+  if (r3.some((d) => d.lane !== "human") || r3.length > 1) return null;
+  if (r3.length) {                                       // the human dot: this is a yes-and
+    if (r1.length !== 1 || r2.length !== 1 || r1[0].lane === r2[0].lane) return null;
+    return { mode: "yes_and", a: r1[0].lane, b: r2[0].lane };
+  }
+  if (r2.length === 1 && r1.length) {                    // a judged round; the glyph is the mode
+    const kind = r2[0].kind || "synthesis";
+    if (kind === "divergence") {
+      if (r1.length !== 2) return null;                  // side-by-side is exactly two seats
+      return { mode: "side_by_side", seats: r1.map((d) => d.lane), judge: r2[0].lane };
+    }
+    return { mode: kind === "map" ? "mapping" : "fusion",
+             panel: r1.map((d) => d.lane), judge: r2[0].lane };
+  }
+  if (!r2.length && r1.length === 1) return { mode: "converse", target: r1[0].lane };
+  return null;
+}
+
+// The dots the current composer state DISPLAYS — the derived editor view, never stored.
+// Mirrors trajGhost's branches control-for-control, so a toggle always works against exactly
+// what is on screen.
+function paintDerived() {
+  const mode = currentMode();
+  if (mode === "converse") {
+    const target = $("#addressee").value || lastAiSpeaker() || roomRoster()[0];
+    return target ? [{ lane: target, frow: 1 }] : [];
+  }
+  if (mode === "fusion" || mode === "mapping" || mode === "side_by_side") {
+    const dots = (mode === "side_by_side" ? pickedSeats() : pickedPanel())
+      .map((m) => ({ lane: m, frow: 1 }));
+    const judge = $(mode === "side_by_side" ? "#sxs-judge" : "#judge-pick").value;
+    if (dots.length && judge) {
+      dots.push({ lane: judge, frow: 2,
+                  kind: mode === "side_by_side" ? "divergence" : mode === "mapping" ? "map" : "synthesis" });
+    }
+    return dots;
+  }
+  const a = $("#ya-a").value, b = $("#ya-b").value;      // yes_and
+  return a && b ? [{ lane: a, frow: 1 }, { lane: b, frow: 2 }, { lane: "human", frow: 3 }] : [];
+}
+
+// A compiled paint writes THE SAME controls the picker edits, then goes through the picker's
+// own change pathway (the #mode dispatch → syncModeUI, chip, disclosure, redraw). Nothing here
+// is a second store: setting the controls programmatically is equivalent to clicking them
+// (recon 38.0), and the per-room stash captures them on room exit exactly as if the picker had
+// been used.
+function applyPaint(sel) {
+  if (sel.mode === "converse") {
+    $("#addressee").value = sel.target;
+  } else if (sel.mode === "yes_and") {
+    $("#ya-a").value = sel.a; $("#ya-b").value = sel.b;
+  } else if (sel.mode === "side_by_side") {
+    document.querySelectorAll("#sxs-pick input").forEach((cb) => { cb.checked = sel.seats.includes(cb.value); });
+    $("#sxs-judge").value = sel.judge;
+  } else {
+    document.querySelectorAll("#panel-pick input").forEach((cb) => { cb.checked = sel.panel.includes(cb.value); });
+    $("#judge-pick").value = sel.judge;
+  }
+  $("#mode").value = sel.mode;
+  $("#mode").dispatchEvent(new Event("change"));
+}
+
+// One paint gesture. A dot that currently wears a judge glyph cycles it — filled → ring →
+// diamond → off, i.e. synthesis → divergence → map → removed; every other dot simply toggles.
+// Then the WHOLE pattern recompiles: into the composer if it means something, into a bare
+// overlay if it doesn't.
+function paintClick(lane, frow) {
+  const cur = STATE.paintDots || paintDerived();
+  const hit = cur.find((d) => d.lane === lane && d.frow === frow);
+  let next;
+  if (!hit) {
+    next = [...cur, { lane, frow, ...(frow === 2 && lane !== "human" ? { kind: "synthesis" } : {}) }];
+  } else if (hit.kind) {
+    const CYCLE = { synthesis: "divergence", divergence: "map", map: null };
+    const nk = CYCLE[hit.kind];
+    next = nk ? cur.map((d) => (d === hit ? { ...d, kind: nk } : d)) : cur.filter((d) => d !== hit);
+  } else {
+    next = cur.filter((d) => d !== hit);
+  }
+  const sel = compilePaint(next);
+  if (sel && !sel.noop) { STATE.paintDots = null; applyPaint(sel); }   // state took over; dots re-derive
+  else if (sel) { STATE.paintDots = null; drawTrajGraph(); }           // empty → the composer's own default
+  else { STATE.paintDots = next; drawTrajGraph(); }                    // bare dots; last valid state stands
 }
 
 // The margin rail: the side-channel made visible. A margin question hangs a connector off
@@ -1154,6 +1318,14 @@ function jumpToTurn(id) {
 }
 
 $("#traj-svg").addEventListener("click", (e) => {
+  // future zone first (38.4): paint a dot, or open the margin from its rail's future column.
+  // Past rows keep click-to-jump untouched — future hits never carry data-turn-id.
+  const fut = e.target.closest(".traj-hit-future");
+  if (fut) {
+    if (fut.hasAttribute("data-margin-rail")) { openMargin(); $("#margin-input").focus(); }
+    else paintClick(fut.getAttribute("data-lane"), Number(fut.getAttribute("data-frow")));
+    return;
+  }
   const hit = e.target.closest("[data-turn-id]");
   if (hit) jumpToTurn(hit.getAttribute("data-turn-id"));
 });
@@ -1589,7 +1761,11 @@ async function refreshRooms() {
 
 // ===== adopt / switch / new ==================================================
 function adoptRoom(view) {
-  _forcePin = !STATE.room || STATE.room.id !== view.id;   // a room SWITCH always lands at the bottom
+  const isSwitch = !STATE.room || STATE.room.id !== view.id;
+  _forcePin = isSwitch;                  // a room SWITCH always lands at the bottom
+  if (isSwitch) STATE.paintDots = null;  // a paint overlay is transient gesture state — it does
+                                         // not follow you across rooms (38.4). Same-room adopts
+                                         // (send results, polls, rollback) leave it alone.
   STATE.room = {
     id: view.id, title: view.title,
     participants: view.participants || [], judge: view.judge || null,
@@ -1867,6 +2043,8 @@ async function send() {
     //  by identity so a backgrounded overlapping stream isn't clobbered.)
     input.value = "";
     delete STATE.drafts[roomId];                 // sent successfully → no draft to restore (Phase 31.2)
+    STATE.paintDots = null;                      // the round consumed the paint (38.4); a non-compiling
+                                                 // overlay was decoration over the last valid state anyway
     // Concurrency: render the result ONLY if its room is still on screen. If the
     // user switched away while it ran, leave the active view alone and let the
     // sidebar dot surface the background completion.
@@ -1883,6 +2061,7 @@ async function send() {
     STATE.pending = null; render();              // drop the optimistic bubble
     if (e && e.name === "AbortError") {          // user hit Stop (Phase 36.5): the message WAS sent
       input.value = ""; delete STATE.drafts[roomId];   // (human turn committed) → don't restore the draft
+      STATE.paintDots = null;                          // …and committed turns consumed the paint (38.4)
       try { if (STATE.room && STATE.room.id === roomId) adoptRoom(await api(`/rooms/${roomId}`)); } catch (_e) { /* */ }
       await refreshRooms();
       setStatus(""); banner("stopped — no answer saved.");
@@ -2287,12 +2466,16 @@ $("#mode").addEventListener("change", () => {
   // reveal the machinery you just chose — a non-converse mode's controls must be visible,
   // not just active (Phase 35.1/35.3). Manual collapse (the toggle) still works after.
   if (currentMode() !== "converse") setAdvanced(true); else updateModeChip();
-  drawTrajGraph();   // the default-future ghost previews the selection this compiles to (38.3)
+  STATE.paintDots = null;   // the state changed under the dots: they re-derive from it (38.4)
+  drawTrajGraph();          // the default-future ghost previews the selection this compiles to (38.3)
 });
-// Any composer-state change moves the ghost: the addressee, and every control inside the
-// disclosure (panel boxes, judges, seats — change events bubble to the container).
-$("#addressee").addEventListener("change", drawTrajGraph);
-$("#composer-advanced").addEventListener("change", drawTrajGraph);
+// Any composer-state change moves the ghost — and drops a non-compiling paint overlay: the
+// dots are a VIEW over the selection state, and the picker just changed that state (38.4).
+// Covers the addressee and every control inside the disclosure (panel boxes, judges, seats —
+// change events bubble to the container).
+const composerMoved = () => { STATE.paintDots = null; drawTrajGraph(); };
+$("#addressee").addEventListener("change", composerMoved);
+$("#composer-advanced").addEventListener("change", composerMoved);
 $("#mode-toggle").addEventListener("click", () => setAdvanced(!STATE.advancedOpen));  // open/close the disclosure
 $("#new-room-btn").addEventListener("click", newRoom);
 $("#room-settings-btn").addEventListener("click", openRoomSettings);

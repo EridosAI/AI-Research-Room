@@ -102,8 +102,8 @@ Side-by-side, Yes-and. What's left:
   sources. Build the channel once; mapping-attribution and verification both consume it.
 - **Debate (later).** Any panel mode with the gate flipped to loop-until-N/conclusion (`gate` is
   `single` today; `loop` is the future value — the one piece `run_mode` doesn't yet implement).
-- **Trajectory graph.** A second producer of the mode-selection object — drag the next round's shape on
-  the graph instead of via the dropdown. Same `/run` rails, no engine change.
+- ~~Trajectory graph~~ — **landed** (Phase 37 the graph, Phase 38.4 the second producer:
+  paint-to-compose on the future rows). Same `/run` rails, no engine change — as anticipated.
 - **`flow: sequential`.** Still declared but unfilled — yes-and didn't need it (B sees A via forward
   context). Waits for a genuine intra-round-sequential mode (e.g. a relay panel); not on the roadmap.
 
@@ -308,21 +308,14 @@ Three deliberate "not yet"s:
   (speaker + the first 80 chars). A real label — a per-turn *summary* — is the old roadmap dependency
   ("summary infra"); it's the same utility that would feed a summary bar and seed compaction. Optional,
   and deliberately not a blocker.
-- **The graph as a second producer of the mode-selection object.** `run_mode`'s docstring has always
-  anticipated this: drag on the rail to shape the *next* round (who answers, who judges) instead of
-  using the composer dropdown. The selection object is already decoupled from execution, so this is a
-  new producer, not a new execution path. The natural first slice is drag-from-human-dot → lane,
-  writing the existing session addressee. Phase 37.5's hit geometry (row rects + node circles) is
-  kept as *separate elements* from the drawn paths precisely so curves never complicate this, and
-  37.6B's centred human lane is incidentally the layout that interaction wants: drag outward from
-  the middle, in either direction.
-- **Fan-edge hover affordances.** Highlighting a round's whole fan on hover would make a dense
-  transcript's rounds pop out individually. Nice, not now.
-- **Distinct yes-and pair marking.** Yes-and writes two ordinary forward `converse` turns with no
-  `round_id` and no marker on the turns themselves — the mode name survives only in the round-head's
-  `meta.selection.mode`, which is **absent on pre-Phase-27 rooms**. v1 therefore draws the pair as what
-  it is forward-wise: two bright vertices. Marking the pair (a brace, a shared tint) means tolerating
-  "unknown" on old rooms.
+- ~~The graph as a second producer of the mode-selection object~~ — **landed as Phase 38.4
+  paint-to-compose** (dots on the future rows compile to the composer's selection state; the drag
+  idea was superseded — the future is more graph). Fan hover affordances and yes-and pair marking
+  landed as 38.1 and 38.2. What remains deferred from that arc: painting an **effort / panel-context
+  override** (the grammar covers who answers, who judges, and the mode — the round's *parameters*
+  still come from the composer's own controls), and any paint gesture for **"auto (last AI)"** — an
+  explicit dot always writes an explicit addressee; auto is picker-only, by design (the graph shows
+  auto's *resolution*, and repainting the resolved dot round-trips to the same place).
 - **Legacy margin brackets.** Margin questions written before Phase 37.1 carry only the `window` policy
   string, not `window_ids`. They get a best-effort `ts`-correlated connector and **no bracket**, because
   `ts` is second-granular and the margin deliberately runs under its own lock — a concurrent main append
