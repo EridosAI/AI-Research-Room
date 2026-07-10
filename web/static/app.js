@@ -862,16 +862,29 @@ function drawTrajBody(svg, geom) {
   // LEAVES (37.7): the line carries the voice of whoever just spoke, and the dot — its own
   // speaker's colour on both rules — is where the colour changes hands. The chord-exception
   // segment of a panel-less round is human-coloured by the same rule, no special case.
-  let prev = -1;
+  //
+  // Yes-and (38.2): the A→B hand-off gets a halo — two voices in one motion. Keyed on the
+  // round-head's meta.selection.mode, NEVER on topology: an AI turn followed by a promoted
+  // note is also two consecutive non-human forward turns, and must not halo. Pre-Phase-27
+  // rooms carry no selection at all and render unmarked, silently.
+  let prev = -1, lastSel = null, sinceHuman = 0;
   turns.forEach((t, i) => {
     if (!isForwardTurn(t)) return;
     if (prev >= 0 && !isFannedChord(prev, i)) {
       const a = xy(prev), b = xy(i);
+      if (sinceHuman === 1 && lastSel === "yes_and") {
+        svg.appendChild(swerve(a.x, a.y, b.x, b.y, {   // appended just before its segment = beneath it
+          class: "traj-halo traj-dimmable", stroke: colorOf(laneOf(turns[prev])), "stroke-width": 4,
+          "stroke-opacity": 0.15, "data-from": turns[prev].id, "data-to": t.id,
+        }));
+      }
       svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
         class: "traj-line traj-dimmable", stroke: colorOf(laneOf(turns[prev])), "stroke-width": 1.5,
         "stroke-opacity": OP_FULL, "data-from": turns[prev].id, "data-to": t.id,
       }));
     }
+    if (t.role === "human") { lastSel = ((t.meta || {}).selection || {}).mode || null; sinceHuman = 0; }
+    else sinceHuman += 1;
     prev = i;
   });
 

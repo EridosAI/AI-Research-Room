@@ -74,6 +74,29 @@ def main():
         _json(f"/rooms/{fus}/run", "POST", {"mode": "converse", "prompt": "and then", "target": "mock"})
         _json(f"/rooms/{fus}/margin", "POST", {"prompt": "aside", "window": "last_1", "model": "mock"})
 
+        # yes-and: the real thing, selection stamped by the engine
+        ya = _json("/rooms", "POST", {"title": "p38 yesand"})["room"]["id"]
+        _json(f"/rooms/{ya}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        _json(f"/rooms/{ya}/run", "POST", {"mode": "yes_and", "prompt": "build",
+                                           "seats": ["mock", "mock_cli"]})
+
+        # the falsifiability pair: an AI answer followed by a promoted note is ALSO two
+        # consecutive non-human forward turns — topology alone must fail this fixture
+        nr = _json("/rooms", "POST", {"title": "p38 note"})["room"]["id"]
+        _json(f"/rooms/{nr}", "PUT", {"participants": ["mock"], "judge": "mock", "margin_model": "mock"})
+        _json(f"/rooms/{nr}/run", "POST", {"mode": "converse", "prompt": "main q", "target": "mock"})
+        mt = _json(f"/rooms/{nr}/margin", "POST", {"prompt": "side q", "window": "last_1", "model": "mock"})
+        ans = next(t for t in mt["margin_turns"] if t["role"] == "ai")
+        _json(f"/rooms/{nr}/margin/{ans['id']}/promote", "POST")
+
+        # yes-and SHAPE without selection (a pre-Phase-27 transcript): renders unmarked
+        old = _json("/rooms", "POST", {"title": "p38 old"})["room"]["id"]
+        _json(f"/rooms/{old}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        with (HOME / "vault" / old / "main.jsonl").open("w", encoding="utf-8") as f:
+            for i, (role, spk) in enumerate([("human", "human"), ("ai", "mock"), ("ai", "mock_cli")]):
+                f.write(json.dumps({"id": f"old-{i}", "ts": f"2026-07-10T00:00:0{i}Z", "mode": "converse",
+                                    "role": role, "speaker": spk, "text": f"t{i}", "meta": {}}) + "\n")
+
         with sync_playwright() as p:
             br = p.chromium.launch(); page = br.new_page(viewport={"width": 1600, "height": 900})
             errs = []
@@ -132,6 +155,43 @@ def main():
             assert page.get_attribute("#traj-svg", "data-hover-margin") is None, "leave did not clear"
             assert styleof(page, ".traj-connector", "strokeOpacity") == "0.4"
             print("38.1B OK: hovering a margin call raises connector + terminal dot + bracket together")
+
+            # ---- 38.2A: yes-and's A→B hand-off halos, in A's colour ------------------
+            open_room(page, "p38 yesand")
+            page.wait_for_selector("#traj-svg .traj-halo")
+            ya_turns = _json(f"/rooms/{ya}")["turns"]
+            a_t, b_t = [t for t in ya_turns if t["role"] == "ai"]
+            halos = page.locator("#traj-svg .traj-halo")
+            assert halos.count() == 1, f"exactly the A→B segment halos: {halos.count()}"
+            assert page.get_attribute(".traj-halo", "data-from") == a_t["id"]
+            assert page.get_attribute(".traj-halo", "data-to") == b_t["id"]
+            a_col = page.get_attribute(f'.traj-node[data-turn-id="{a_t["id"]}"]', "fill")
+            assert page.get_attribute(".traj-halo", "stroke") == a_col, "halo carries A's colour (origin)"
+            assert page.get_attribute(".traj-halo", "stroke-width") == "4"
+            assert page.get_attribute(".traj-halo", "d") == page.get_attribute(
+                f'.traj-line[data-from="{a_t["id"]}"]', "d"), "halo shares its segment's exact path"
+            # beneath the bright segment: the halo precedes it in document order
+            assert page.evaluate("""() => {
+              const h = document.querySelector('.traj-halo');
+              const l = document.querySelector(`.traj-line[data-from="${h.dataset.from}"]`);
+              return !!(h.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING);
+            }"""), "the halo must paint beneath (before) its bright segment"
+            print("38.2A OK: yes-and halos exactly A→B, A-coloured, beneath the trajectory")
+
+            # ---- 38.2B: the falsifiability pair — topology alone must fail ----------
+            open_room(page, "p38 note")
+            page.wait_for_selector("#traj-svg .traj-node")
+            nr_turns = _json(f"/rooms/{nr}")["turns"]
+            assert nr_turns[-2]["role"] == "ai" and nr_turns[-1]["role"] == "note", \
+                f"fixture must end ai→note: {[(t['role']) for t in nr_turns]}"
+            assert page.locator("#traj-svg .traj-halo").count() == 0, \
+                "an AI-then-promoted-note adjacency must NOT halo — the halo keys on selection"
+
+            open_room(page, "p38 old")
+            page.wait_for_selector("#traj-svg .traj-node")
+            assert page.locator("#traj-svg .traj-halo").count() == 0, \
+                "a selection-less yes-and SHAPE renders unmarked (pre-Phase-27 rooms)"
+            print("38.2B OK: promoted-note adjacency and selection-less shape both stay unmarked")
 
             assert not errs, f"page errors: {errs}"
             br.close()
