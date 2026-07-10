@@ -52,6 +52,9 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
   onto one shared row (a blind concurrent panel is one event). Spacing runs on the row count. SVG has
   no z-index, so document order *is* depth — the paint order (margin → lanes → fans → trajectory →
   panel dots → vertices → hits) is load-bearing, not cosmetic.
+- Every trajectory/fan stroke takes its **ORIGIN** turn's colour (37.7): the line carries the voice
+  of whoever just spoke; the dot is where the colour changes hands. Margin connectors/brackets are
+  indicators, not trajectory — they stay grey and are exempt from the rule.
 
 ## Deploy / run
 - `python -m web.server` → http://127.0.0.1:8765 (`--open` also launches a browser).

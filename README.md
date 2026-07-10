@@ -180,7 +180,9 @@ Two layers, cleanly split:
   flows onward. A research round is drawn as the **event** it is rather than a step in a conversation:
   the direct chord is suppressed, and the round fans out from your prompt to every panelist *on one
   shared row* (the panel is blind and concurrent, so it is one moment, not N) and back in to the
-  judge, the converging strokes all in the judge's colour. The judge's glyph names the mode — filled
+  judge. Every stroke takes its **origin** turn's colour — the line carries the voice of whoever just
+  spoke, and a dot is where the colour changes hands — so the fan spreads in your colour and each
+  panelist's answer converges on the judge in its own. The judge's glyph names the mode — filled
   circle for fusion's *synthesis*, a ring for side-by-side's *divergence*, a diamond for a *map*. A
   **margin rail** on the right runs a connector from your lane across to the rail at the row each
   side-question was asked beside, bracketing the turns it actually read. Clicking a row scrolls the

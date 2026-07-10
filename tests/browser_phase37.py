@@ -101,6 +101,9 @@ def main():
         _json(f"/rooms/{fus}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
         _json(f"/rooms/{fus}/run", "POST", {"mode": "fusion", "prompt": "fuse this",
                                             "panel": ["mock", "mock_cli"], "judge": "mock"})
+        # a converse follow-up, so a bright segment LEAVES the judge (the 37.7 origin-colour
+        # check needs one, and the next forward speaker — you — differs from it in colour)
+        _json(f"/rooms/{fus}/run", "POST", {"mode": "converse", "prompt": "follow-up", "target": "mock"})
 
         # yes-and: two sequential forward answers, stamped as ordinary converse turns
         ya = _json("/rooms", "POST", {"title": "p37 yesand"})["room"]["id"]
@@ -296,8 +299,8 @@ def main():
             panels = [t for t in fus_turns if (t["meta"] or {}).get("is_panelist_raw")]
             assert page.locator(f'.traj-line[data-from="{head["id"]}"][data-to="{judge["id"]}"]').count() == 0, \
                 "a fanned round must NOT also draw a direct bright human→judge chord"
-            assert page.locator("#traj-svg .traj-line").count() == 0, \
-                "the fusion fixture's only forward pair IS the suppressed chord"
+            assert page.locator("#traj-svg .traj-line").count() == 2, \
+                "chord suppressed; only the follow-up's two segments (judge→human→ai) remain"
             assert page.locator("#traj-svg .traj-fan-out").count() == len(panels), "one fan-out edge per panelist"
             assert page.locator("#traj-svg .traj-fan-in").count() == len(panels), "one fan-in edge per panelist"
             for p in panels:      # edges are anchored to real turns, not just counted
@@ -306,16 +309,32 @@ def main():
             fan_op = float(page.get_attribute(".traj-fan-out", "stroke-opacity"))
             assert fan_op == 0.55, f"fan edges sit at the mid register: {fan_op}"
 
-            # Destination colour, both ways. Assert on the panelist that ISN'T the judge — for the
-            # judge's own panel turn the two colours coincide and nothing is being tested.
+            # ORIGIN colour (37.7): a stroke carries the voice of whoever just spoke; the dot is
+            # where the colour changes hands. Falsifiability first — every colour compared below
+            # must differ in the fixture, or an assertion couldn't fail. The fan-in is asserted on
+            # the panelist whose colour differs from the judge's: for the judge's own panel turn
+            # origin- and destination-colouring coincide and nothing would be tested (the mirror
+            # of the 37.5 vacuity fix, which had the same blind spot the other way round).
+            node_fill = lambda tid: page.get_attribute(f'.traj-node[data-turn-id="{tid}"]', "fill")
             other = next(p for p in panels if p["speaker"] != judge["speaker"])
-            judge_col = page.get_attribute(f'.traj-node[data-turn-id="{judge["id"]}"]', "fill")
-            other_col = page.get_attribute(f'.traj-node[data-turn-id="{other["id"]}"]', "fill")
+            human_col, judge_col, other_col = node_fill(head["id"]), node_fill(judge["id"]), node_fill(other["id"])
             assert judge_col != other_col, "fixture must give the judge and this panelist different colours"
-            assert page.get_attribute(f'.traj-fan-out[data-to="{other["id"]}"]', "stroke") == other_col, \
-                "a fan-out edge takes its destination panelist's colour"
-            assert page.get_attribute(f'.traj-fan-in[data-from="{other["id"]}"]', "stroke") == judge_col, \
-                "a fan-in edge takes its destination judge's colour — N converging strokes of one colour"
+            assert human_col not in (judge_col, other_col), \
+                "fixture must give the human a colour no panelist shares"
+            out_strokes = set(page.eval_on_selector_all(
+                "#traj-svg .traj-fan-out", "els => els.map(e => e.getAttribute('stroke'))"))
+            assert out_strokes == {human_col}, \
+                f"every fan-out edge carries its ORIGIN's (the round-head's) colour: {out_strokes}"
+            assert page.get_attribute(f'.traj-fan-in[data-from="{other["id"]}"]', "stroke") == other_col, \
+                "a fan-in edge carries its ORIGIN panelist's own colour into the judge"
+
+            # …and the bright segment LEAVING the judge is judge-coloured, not next-speaker-coloured
+            j_at = next(i for i, t in enumerate(fus_turns) if t["id"] == judge["id"])
+            follow = next(t for t in fus_turns[j_at + 1:] if not (t["meta"] or {}).get("is_panelist_raw"))
+            assert node_fill(follow["id"]) != judge_col, \
+                "fixture: the speaker after the judge must differ from it in colour"
+            seg = page.get_attribute(f'.traj-line[data-from="{judge["id"]}"][data-to="{follow["id"]}"]', "stroke")
+            assert seg == judge_col, f"the segment leaving the judge carries the judge's voice: {seg}"
 
             # judge-as-panelist: its own fan-in runs straight DOWN its lane to the bright vertex
             same_lane = next(p for p in panels if p["speaker"] == judge["speaker"])
@@ -331,7 +350,12 @@ def main():
                 "a panel-less round must keep its direct segment — the line may never break"
             assert page.locator("#traj-svg .traj-fan-out").count() == 0
             assert page.locator("#traj-svg .traj-fan-in").count() == 0
-            print("37.5A OK: a round with no surviving panel turns keeps an unbroken bright line")
+            # the exception chord obeys the same origin rule: human-coloured, no special case
+            assert node_fill("bare-h") != node_fill("bare-j"), \
+                "fixture: human and judge colours must differ for the chord check to bite"
+            assert page.get_attribute('.traj-line[data-from="bare-h"][data-to="bare-j"]', "stroke") \
+                == node_fill("bare-h"), "the exception chord is ORIGIN (human) coloured"
+            print("37.5A OK: panel-less round keeps an unbroken, human-coloured bright segment")
 
             # ---- 37.5B: the judge glyph carries the round's kind -------------------
             glyph_of = lambda: page.eval_on_selector(

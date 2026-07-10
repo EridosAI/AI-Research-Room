@@ -816,15 +816,16 @@ function drawTrajBody(svg, geom) {
     }), key));
   }
 
-  // The fan: head → every surviving panelist → judge. Destination colour, as everywhere else,
-  // so the fan-in reads as N same-coloured strokes converging on the judge.
+  // The fan: head → every surviving panelist → judge. ORIGIN colour, as everywhere else (37.7):
+  // a stroke carries the voice of whoever just spoke, so the fan-out spreads in the asker's
+  // colour and each panelist's answer converges on the judge in its own.
   for (const r of rounds.values()) {
     if (!r.panels.length) continue;              // nothing to fan; the chord below stays
     for (const p of r.panels) {
       if (r.head >= 0) {
         const a = xy(r.head), b = xy(p);
         svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-          class: "traj-fan-out", stroke: colorOf(laneOf(turns[p])),
+          class: "traj-fan-out", stroke: colorOf(laneOf(turns[r.head])),
           "stroke-width": 1, "stroke-opacity": OP_MID,
           "data-from": turns[r.head].id, "data-to": turns[p].id,
         }));
@@ -832,7 +833,7 @@ function drawTrajBody(svg, geom) {
       if (r.judge >= 0) {
         const a = xy(p), b = xy(r.judge);
         svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-          class: "traj-fan-in", stroke: colorOf(laneOf(turns[r.judge])),
+          class: "traj-fan-in", stroke: colorOf(laneOf(turns[p])),
           "stroke-width": 1, "stroke-opacity": OP_MID,
           "data-from": turns[p].id, "data-to": turns[r.judge].id,
         }));
@@ -852,15 +853,17 @@ function drawTrajBody(svg, geom) {
     return !!(r && r.panels.length);
   };
 
-  // The bright line traces forward context exactly. Each segment is coloured by the turn
-  // it arrives at, so a swerve reads as the next speaker taking the floor.
+  // The bright line traces forward context exactly. Each segment is coloured by the turn it
+  // LEAVES (37.7): the line carries the voice of whoever just spoke, and the dot — its own
+  // speaker's colour on both rules — is where the colour changes hands. The chord-exception
+  // segment of a panel-less round is human-coloured by the same rule, no special case.
   let prev = -1;
   turns.forEach((t, i) => {
     if (!isForwardTurn(t)) return;
     if (prev >= 0 && !isFannedChord(prev, i)) {
       const a = xy(prev), b = xy(i);
       svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-        class: "traj-line", stroke: colorOf(laneOf(t)), "stroke-width": 1.5,
+        class: "traj-line", stroke: colorOf(laneOf(turns[prev])), "stroke-width": 1.5,
         "stroke-opacity": OP_FULL, "data-from": turns[prev].id, "data-to": t.id,
       }));
     }
