@@ -648,6 +648,7 @@ const OP_LANE = 0.30;    // lane guides
 const OP_MID = 0.55;     // fan edges + raw panelist dots
 const OP_FULL = 1.0;     // the trajectory and its vertices
 const CURVE_K = 0.45;    // Bézier handle length, as a fraction of the segment's dy
+const OP_HOVER_DIM = 0.6; // hover: everything OUTSIDE the hovered round/call drops to 0.6×
 
 const SVGNS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs) {
@@ -773,10 +774,12 @@ const JUDGE_GLYPH = { synthesis: "circle", divergence: "ring", map: "diamond" };
 
 function trajNode(t, x, y, color, fwd) {
   const common = {
-    class: `traj-node ${fwd ? "traj-vertex" : "traj-panel"}`,
+    class: `traj-node traj-dimmable ${fwd ? "traj-vertex" : "traj-panel"}`,
     "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
     "fill-opacity": fwd ? OP_FULL : OP_MID,
   };
+  const rid = (t.meta || {}).round_id;
+  if (rid) common["data-round-id"] = rid;      // hover raises the whole round together (38.1)
   if (t.role !== "judge") return svgEl("circle", { cx: x, cy: y, r: 2.5, fill: color, ...common });
 
   const kind = (t.meta && t.meta.judge_kind) || "synthesis";
@@ -806,12 +809,14 @@ function drawTrajBody(svg, geom) {
   const yOf = (i) => rowY(rowOf.get(turns[i].id));
   const xy = (i) => ({ x: laneX(laneOf(turns[i])), y: yOf(i) });
 
+  geom.marginHits = [];        // hit geometry the margin pass builds; appended at the TOP later
+  geom.marginIds = [];
   drawTrajMargin(svg, geom);   // furthest back: it passes beneath everything it crosses
 
   // lane guides — thin, solid, dot-coloured
   for (const key of lanes) {
     svg.appendChild(svgTitle(svgEl("line", {
-      x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane",
+      x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane traj-dimmable",
       "data-lane": key, stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": OP_LANE,
     }), key));
   }
@@ -819,22 +824,22 @@ function drawTrajBody(svg, geom) {
   // The fan: head → every surviving panelist → judge. ORIGIN colour, as everywhere else (37.7):
   // a stroke carries the voice of whoever just spoke, so the fan-out spreads in the asker's
   // colour and each panelist's answer converges on the judge in its own.
-  for (const r of rounds.values()) {
+  for (const [rid, r] of rounds.entries()) {
     if (!r.panels.length) continue;              // nothing to fan; the chord below stays
     for (const p of r.panels) {
       if (r.head >= 0) {
         const a = xy(r.head), b = xy(p);
         svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-          class: "traj-fan-out", stroke: colorOf(laneOf(turns[r.head])),
-          "stroke-width": 1, "stroke-opacity": OP_MID,
+          class: "traj-fan-out traj-dimmable", stroke: colorOf(laneOf(turns[r.head])),
+          "stroke-width": 1, "stroke-opacity": OP_MID, "data-round-id": rid,
           "data-from": turns[r.head].id, "data-to": turns[p].id,
         }));
       }
       if (r.judge >= 0) {
         const a = xy(p), b = xy(r.judge);
         svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-          class: "traj-fan-in", stroke: colorOf(laneOf(turns[p])),
-          "stroke-width": 1, "stroke-opacity": OP_MID,
+          class: "traj-fan-in traj-dimmable", stroke: colorOf(laneOf(turns[p])),
+          "stroke-width": 1, "stroke-opacity": OP_MID, "data-round-id": rid,
           "data-from": turns[p].id, "data-to": turns[r.judge].id,
         }));
       }
@@ -863,7 +868,7 @@ function drawTrajBody(svg, geom) {
     if (prev >= 0 && !isFannedChord(prev, i)) {
       const a = xy(prev), b = xy(i);
       svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
-        class: "traj-line", stroke: colorOf(laneOf(turns[prev])), "stroke-width": 1.5,
+        class: "traj-line traj-dimmable", stroke: colorOf(laneOf(turns[prev])), "stroke-width": 1.5,
         "stroke-opacity": OP_FULL, "data-from": turns[prev].id, "data-to": t.id,
       }));
     }
@@ -895,10 +900,12 @@ function drawTrajBody(svg, geom) {
     rowTarget[r] = rnd && rnd.head >= 0 ? turns[rnd.head] : t;
   });
   rowTarget.forEach((t, r) => {
-    const hit = svgEl("rect", {
+    const attrs = {
       x: 0, y: rowY(r) - gap / 2, width: TRAJ.railW, height: Math.max(gap, 8),
       class: "traj-hit", "data-turn-id": t.id, "data-row": r,
-    });
+    };
+    if ((t.meta || {}).round_id) attrs["data-round-id"] = t.meta.round_id;
+    const hit = svgEl("rect", attrs);
     svgTitle(hit, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
     svg.appendChild(hit);
   });
@@ -909,10 +916,40 @@ function drawTrajBody(svg, geom) {
   const hitR = Math.max(3, Math.min(6, gap / 2));
   turns.forEach((t, i) => {
     const p = xy(i);
-    const hit = svgEl("circle", { cx: p.x, cy: p.y, r: hitR, class: "traj-hit-node", "data-turn-id": t.id });
+    const attrs = { cx: p.x, cy: p.y, r: hitR, class: "traj-hit-node", "data-turn-id": t.id };
+    if ((t.meta || {}).round_id) attrs["data-round-id"] = t.meta.round_id;
+    const hit = svgEl("circle", attrs);
     svgTitle(hit, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
     svg.appendChild(hit);
   });
+
+  // margin hit geometry last (drawTrajMargin painted its strokes FIRST — the very back), so
+  // hovering a connector or bracket works even though the strokes themselves sit under rows
+  for (const m of geom.marginHits) { svg.appendChild(m); }
+
+  trajHoverRules(svg, rounds, geom.marginIds);
+}
+
+// One generated <style> per redraw: a dim + raise rule pair per round and per margin call.
+// Hover then only flips ONE attribute on the SVG root — no per-element style mutation, no
+// redraw, no element creation. (CSS alone cannot match "elements whose data-round-id equals
+// the root's data-hover-round", so the identity is compiled into rules at draw time.)
+function trajHoverRules(svg, rounds, marginIds) {
+  const rules = [];
+  for (const rid of rounds.keys()) {
+    const r = CSS.escape(rid);
+    rules.push(`#traj-svg[data-hover-round="${r}"] .traj-dimmable:not([data-round-id="${r}"]) { opacity: ${OP_HOVER_DIM}; }`);
+    rules.push(`#traj-svg[data-hover-round="${r}"] [data-round-id="${r}"] { stroke-opacity: 1; fill-opacity: 1; }`);
+  }
+  for (const mid of marginIds || []) {
+    const m = CSS.escape(mid);
+    rules.push(`#traj-svg[data-hover-margin="${m}"] .traj-dimmable:not([data-margin-id="${m}"]) { opacity: ${OP_HOVER_DIM}; }`);
+    rules.push(`#traj-svg[data-hover-margin="${m}"] [data-margin-id="${m}"] { stroke-opacity: 1; fill-opacity: 1; }`);
+  }
+  if (!rules.length) return;
+  const style = document.createElementNS(SVGNS, "style");
+  style.textContent = rules.join("\n");
+  svg.appendChild(style);
 }
 
 // The margin rail: the side-channel made visible. A margin question hangs a connector off
@@ -946,13 +983,23 @@ function drawTrajMargin(svg, geom) {
   // A connector is an indicator, not a trajectory: straight, never curved. It spans the full
   // width from its origin lane to the rail. Terminal dot in the CONNECTOR's colour, not the
   // lane's — the side-question came from you, but it isn't a turn in the conversation.
-  const connector = (y, cls, x0) => svgEl("line", {
-    x1: marginX, y1: y, x2: x0, y2: y, class: cls,
+  const connector = (y, cls, x0, mid) => svgEl("line", {
+    x1: marginX, y1: y, x2: x0, y2: y, class: `${cls} traj-dimmable`, "data-margin-id": mid,
     stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.4,
   });
-  const originDot = (y) => svgEl("circle", {
-    cx: humanX, cy: y, r: 2.5, fill: DOT_DEFAULT, "fill-opacity": 0.4, class: "traj-margin-dot",
+  const originDot = (y, mid) => svgEl("circle", {
+    cx: humanX, cy: y, r: 2.5, fill: DOT_DEFAULT, "fill-opacity": 0.4,
+    class: "traj-margin-dot traj-dimmable", "data-margin-id": mid,
   });
+  // The strokes above paint at the very BACK; a transparent hit RECT per call, appended at the
+  // hit stage, is what makes them hoverable (a zero-height line is invisible to hit testing).
+  // It carries the anchor row's turn id too, so clicking a connector jumps to its row.
+  const marginHit = (x, y, w, h, mid, turnId, label) => {
+    const r = svgEl("rect", { x, y, width: Math.max(w, 9), height: Math.max(h, 9),
+                              class: "traj-hit-margin", "data-margin-id": mid, "data-turn-id": turnId });
+    geom.marginHits.push(svgTitle(r, label));
+    if (!geom.marginIds.includes(mid)) geom.marginIds.push(mid);
+  };
 
   for (const q of margins) {
     if (q.role !== "human") continue;            // one connector per QUESTION, not per answer
@@ -964,14 +1011,19 @@ function drawTrajMargin(svg, geom) {
       if (!rows.length) continue;                // every windowed turn was rolled back — draw nothing
       const lo = Math.min(...rows), hi = Math.max(...rows);
       const label = `margin (${meta.window || "window"}): ${(q.text || "").slice(0, 80)}`;
-      svg.appendChild(svgTitle(connector(rowY(hi), "traj-connector", humanX), label));
-      svg.appendChild(originDot(rowY(hi)));
+      svg.appendChild(svgTitle(connector(rowY(hi), "traj-connector", humanX, q.id), label));
+      svg.appendChild(originDot(rowY(hi), q.id));
       // BRACKET_CAP encloses the windowed rows rather than ending on their centres — and it is
       // what makes a single-row window (last_1) a visible tick instead of a zero-length line.
       svg.appendChild(svgTitle(svgEl("line", {
         x1: marginX, y1: rowY(lo) - BRACKET_CAP, x2: marginX, y2: rowY(hi) + BRACKET_CAP,
-        class: "traj-bracket", stroke: DOT_DEFAULT, "stroke-width": 2, "stroke-opacity": 0.6,
+        class: "traj-bracket traj-dimmable", "data-margin-id": q.id,
+        stroke: DOT_DEFAULT, "stroke-width": 2, "stroke-opacity": 0.6,
       }), label));
+      const anchor = STATE.turns.find((t) => rowOf.get(t.id) === hi);   // the connector's row
+      marginHit(humanX, rowY(hi) - 4.5, marginX - humanX, 9, q.id, anchor ? anchor.id : "", label);
+      marginHit(marginX - 4.5, rowY(lo) - BRACKET_CAP, 9, rowY(hi) - rowY(lo) + 2 * BRACKET_CAP,
+                q.id, anchor ? anchor.id : "", label);            // the bracket is hoverable too
       continue;
     }
 
@@ -979,9 +1031,10 @@ function drawTrajMargin(svg, geom) {
     const seen = forward.filter((t) => (t.ts || "") <= (q.ts || "")).pop();
     if (!seen) continue;
     const anchor = rowOf.get(seen.id);
-    svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx", humanX),
-      `margin (${meta.window || "window"}, approximate): ${(q.text || "").slice(0, 80)}`));
-    svg.appendChild(originDot(rowY(anchor)));
+    const label = `margin (${meta.window || "window"}, approximate): ${(q.text || "").slice(0, 80)}`;
+    svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx", humanX, q.id), label));
+    svg.appendChild(originDot(rowY(anchor), q.id));
+    marginHit(humanX, rowY(anchor) - 4.5, marginX - humanX, 9, q.id, seen.id, label);
   }
 
   // The one deliberate margin → main backflow. It already terminates on a bright forward vertex
@@ -989,8 +1042,10 @@ function drawTrajMargin(svg, geom) {
   for (const t of promoted) {
     const r = rowOf.get(t.id);
     if (r === undefined) continue;
-    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted", laneX(laneOf(t))),
-      `promoted from margin: ${(t.text || "").slice(0, 80)}`));
+    const label = `promoted from margin: ${(t.text || "").slice(0, 80)}`;
+    const x0 = laneX(laneOf(t));
+    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted", x0, t.id), label));
+    marginHit(x0, rowY(r) - 4.5, marginX - x0, 9, t.id, t.id, label);
   }
 }
 
@@ -1009,6 +1064,22 @@ function jumpToTurn(id) {
 $("#traj-svg").addEventListener("click", (e) => {
   const hit = e.target.closest("[data-turn-id]");
   if (hit) jumpToTurn(hit.getAttribute("data-turn-id"));
+});
+
+// Hover (38.1): resolve the hovered HIT element's round/call and flip one attribute on the SVG
+// root; the draw-time stylesheet does the rest. pointerover fires per element entered, so a
+// non-round hit (a converse row, the future zone) clears the highlight on its own.
+$("#traj-svg").addEventListener("pointerover", (e) => {
+  const svg = $("#traj-svg");
+  const hit = e.target.closest(".traj-hit, .traj-hit-node, .traj-hit-margin");
+  const rid = hit && hit.getAttribute("data-round-id");
+  const mid = hit && hit.getAttribute("data-margin-id");
+  if (rid) svg.setAttribute("data-hover-round", rid); else svg.removeAttribute("data-hover-round");
+  if (mid) svg.setAttribute("data-hover-margin", mid); else svg.removeAttribute("data-hover-margin");
+});
+$("#traj-svg").addEventListener("pointerleave", () => {
+  $("#traj-svg").removeAttribute("data-hover-round");
+  $("#traj-svg").removeAttribute("data-hover-margin");
 });
 
 // ===== composer pickers (scoped to the ACTIVE ROOM's roster) =================
