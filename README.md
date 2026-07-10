@@ -190,13 +190,15 @@ Two layers, cleanly split:
   raises its whole fan and dims everything else, and a **yes-and** hand-off glows — a halo under the
   A→B segment, two voices in one motion. The rail runs at a **fixed scale** (twelve rows visible,
   scrolling with the same follow-the-bottom rule as the transcript) and past the live edge keeps a
-  five-row **future zone**: a ghost of what send would do *right now*, rendered from the composer's
-  own state — including an auto addressee resolved honestly to the last AI speaker. And the future is
-  **paintable**: clicking lane intersections composes the next round — one dot is a converse, dots
-  plus a judge dot are a panel round whose mode you cycle through the judge's own glyph (filled →
-  ring → diamond → off), and a human dot at the end flips A-then-B from "panel of one, judged by B"
-  to "B builds on A" (yes-and). Paint writes the **same selection state** the composer picker edits —
-  one state, two editors; a pattern that doesn't compile renders bare and changes nothing. Clicking
+  five-row **future zone**. It always opens with the **ghost round-head** — a hollow ring on your
+  lane joined to the last bright vertex, because every round begins with you — and below it a ghost
+  of what send would do *right now*, rendered from the composer's own state, including an auto
+  addressee resolved honestly to the last AI speaker. And the future is **paintable**: clicking lane
+  intersections composes the next round — one dot is a converse, dots plus a judge dot are a panel
+  round whose mode you cycle through the judge's own glyph (filled → ring → diamond → off), and a
+  human dot at the end flips A-then-B from "panel of one, judged by B" to "B builds on A" (yes-and).
+  Paint writes the **same selection state** the composer picker edits — one state, two editors; a
+  pattern that doesn't compile connects as far as it goes and changes nothing. Clicking
   the margin rail's future column opens the margin pane, ready to ask sideways. It all renders from
   turns the client already has, and the transcript pane no longer yanks you to the bottom while you
   read scrollback (it follows the bottom only if you were already there).

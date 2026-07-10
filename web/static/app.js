@@ -958,9 +958,11 @@ function drawTrajBody(svg, geom) {
 
   // Future-zone hit geometry (38.4): a paint target at every lane × future-row intersection,
   // plus the margin rail's future column — asking sideways is also a next step. None carry
-  // data-turn-id, so the click handler's jump branch never sees them.
+  // data-turn-id, so the click handler's jump branch never sees them. Row +1 is the ghost
+  // round-head (38.5A) and is NOT paintable: the grid starts at +2 — the dead clicks are
+  // removed structurally, not disabled.
   const paintR = Math.max(5, hitR);
-  for (let k = 1; k <= FUTURE_ROWS; k++) {
+  for (let k = 2; k <= FUTURE_ROWS; k++) {
     for (const key of lanes) {
       const hit = svgEl("circle", { cx: laneX(key), cy: rowY(rows - 1 + k), r: paintR,
                                     class: "traj-hit-future", "data-lane": key, "data-frow": k });
@@ -1022,8 +1024,12 @@ function lastAiSpeaker() {
 // 38.4 makes the future zone an EDITOR too. The dots are a VIEW over the composer's selection
 // state, compiled in both directions: a pattern that compiles is written INTO the composer
 // controls and the dots re-derive from state (STATE.paintDots stays null — state is the only
-// truth); a pattern that does not compile renders bare from STATE.paintDots — dots, no
-// strokes — and the composer keeps the last valid state.
+// truth); a pattern that does not compile renders from STATE.paintDots — the dots, plus every
+// stroke whose endpoints both exist (38.5B) — and the composer keeps the last valid state.
+//
+// 38.5A makes the round-head explicit: future row +1 always carries a ghost human ring (every
+// round begins with a human turn) joined to the last real vertex by the now-connection, and
+// the grammar's offsets count from it — target row +2, judge +3, yes-and discriminator +4.
 
 // One ghost vertex. Plain = a hollow ring. A judge wears its round-kind GLYPH (the 37.5B
 // language doubling as the paint cycle's read-back): filled = synthesis, double ring =
@@ -1063,38 +1069,66 @@ function trajGhost(svg, geom) {
   const x0 = laneX(laneOf(t0)), y0 = rowY(rowOf.get(t0.id));
   const fy = (k) => rowY(rows - 1 + k);                 // future row k = 1..FUTURE_ROWS
 
-  // A non-compiling paint renders exactly as painted, and NOTHING connects — the graph must
-  // not pretend a pattern runs when send would in fact do something else.
-  if (STATE.paintDots) {
-    for (const d of STATE.paintDots) {
-      if (lanes.includes(d.lane)) ghostNode(svg, geom, d.lane, d.frow, d.kind || null);
-    }
-    return;
-  }
-
   const edge = (xa, ya, xb, yb, color) => svg.appendChild(swerve(xa, ya, xb, yb, {
     class: "traj-ghost traj-ghost-edge traj-dimmable", stroke: color,
     "stroke-width": 1, "stroke-opacity": OP_GHOST,
   }));
 
+  // The ghost ROUND-HEAD (38.5A): every round begins with a human turn — the engine has no
+  // other path — so future row +1 always says so, and the now-connection joins the last real
+  // vertex to it in the LAST FORWARD SPEAKER's colour (the origin rule: judge-coloured after
+  // a round, model-coloured after converse). The bright line doesn't just stop; the present
+  // moment is continuous. The head is NOT paintable — the hit grid starts at +2.
+  const hx = laneX("human"), hy = fy(1);
+  svg.appendChild(swerve(x0, y0, hx, hy, {
+    class: "traj-ghost traj-ghost-edge traj-ghost-now traj-dimmable",
+    stroke: colorOf(laneOf(t0)), "stroke-width": 1, "stroke-opacity": OP_GHOST,
+  }));
+  ghostNode(svg, geom, "human", 1, null);
+
+  // A non-compiling paint draws every stroke whose endpoints BOTH exist (38.5B): the shape
+  // connects as it is built, at the same register, and full validity is visually just "the
+  // shape completed" — the state write and the chip flip stay the only signal that send
+  // behaviour changed. This branch READS paint state; it never writes selection state. The
+  // one deliberately bare state is a judge with no panel — a fan-in has no sources, and a
+  // head→judge stroke would falsely read as converse. The +3 dot follows the discriminator
+  // exactly as compile does: a human dot at +4 makes it a plain yes-and B (B→human stroke);
+  // its absence makes it a judge (glyph + fan-in).
+  if (STATE.paintDots) {
+    const dots = STATE.paintDots.filter((d) => lanes.includes(d.lane));
+    const disc = dots.some((d) => d.frow === 4 && d.lane === "human");
+    const targets = dots.filter((d) => d.frow === 2 && d.lane !== "human");
+    const thirds = dots.filter((d) => d.frow === 3 && d.lane !== "human");
+    for (const t of targets) edge(hx, hy, laneX(t.lane), fy(2), colorOf("human"));
+    for (const j of thirds) {
+      for (const t of targets) edge(laneX(t.lane), fy(2), laneX(j.lane), fy(3), colorOf(t.lane));
+      if (disc) edge(laneX(j.lane), fy(3), laneX("human"), fy(4), colorOf(j.lane));
+    }
+    for (const d of dots) {
+      const asJudge = d.frow === 3 && d.lane !== "human" && !disc;
+      ghostNode(svg, geom, d.lane, d.frow, asJudge ? d.kind || "synthesis" : null);
+    }
+    return;
+  }
+
   const mode = currentMode();
   if (mode === "converse") {
     const target = $("#addressee").value || lastAiSpeaker() || ((STATE.room.participants || [])[0]);
     if (!target || !lanes.includes(target)) return;
-    edge(x0, y0, laneX(target), fy(1), colorOf("human"));
-    ghostNode(svg, geom, target, 1, null);
+    edge(hx, hy, laneX(target), fy(2), colorOf("human"));
+    ghostNode(svg, geom, target, 2, null);
     return;
   }
   if (mode === "fusion" || mode === "mapping" || mode === "side_by_side") {
     const members = (mode === "side_by_side" ? pickedSeats() : pickedPanel()).filter((m) => lanes.includes(m));
     const judge = $(mode === "side_by_side" ? "#sxs-judge" : "#judge-pick").value;
     for (const m of members) {
-      edge(x0, y0, laneX(m), fy(1), colorOf("human"));
-      ghostNode(svg, geom, m, 1, null);
-      if (judge && lanes.includes(judge)) edge(laneX(m), fy(1), laneX(judge), fy(2), colorOf(m));
+      edge(hx, hy, laneX(m), fy(2), colorOf("human"));
+      ghostNode(svg, geom, m, 2, null);
+      if (judge && lanes.includes(judge)) edge(laneX(m), fy(2), laneX(judge), fy(3), colorOf(m));
     }
     if (members.length && judge && lanes.includes(judge)) {
-      ghostNode(svg, geom, judge, 2,
+      ghostNode(svg, geom, judge, 3,
                 mode === "side_by_side" ? "divergence" : mode === "mapping" ? "map" : "synthesis");
     }
     return;
@@ -1102,26 +1136,27 @@ function trajGhost(svg, geom) {
   if (mode === "yes_and") {
     const a = $("#ya-a").value, b = $("#ya-b").value;
     if (!a || !b || !lanes.includes(a) || !lanes.includes(b)) return;
-    edge(x0, y0, laneX(a), fy(1), colorOf("human")); ghostNode(svg, geom, a, 1, null);
-    edge(laneX(a), fy(1), laneX(b), fy(2), colorOf(a)); ghostNode(svg, geom, b, 2, null);
-    edge(laneX(b), fy(2), laneX("human"), fy(3), colorOf(b)); ghostNode(svg, geom, "human", 3, null);
+    edge(hx, hy, laneX(a), fy(2), colorOf("human")); ghostNode(svg, geom, a, 2, null);
+    edge(laneX(a), fy(2), laneX(b), fy(3), colorOf(a)); ghostNode(svg, geom, b, 3, null);
+    edge(laneX(b), fy(3), laneX("human"), fy(4), colorOf(b)); ghostNode(svg, geom, "human", 4, null);
   }
 }
 
-// ---- paint-to-compose (38.4) ------------------------------------------------
-// The grammar. Row +1 = who answers. A single KINDED dot at +2 is the judge, and its glyph IS
-// the mode: synthesis → fusion, divergence → side-by-side (which demands exactly two seats),
-// map → mapping. A human dot at +3 is the yes-and discriminator: with it, +1 is A and +2 is B
-// building on A; without it, the same two dots read as a one-panelist round judged by B.
-// Everything else — human dots off +3, model dots at +3, anything past +3, a judge with no
-// panel, several dots at +2, a lane the roster can't express — does not compile. Returns the
-// compiled selection, {noop: true} for an empty pattern (= the composer as it stands), or null.
+// ---- paint-to-compose (38.4; offsets from the explicit round-head since 38.5) -------------
+// The grammar. Future row +1 is the ghost ROUND-HEAD — never a dot, never a hit. Row +2 = who
+// answers. A single KINDED dot at +3 is the judge, and its glyph IS the mode: synthesis →
+// fusion, divergence → side-by-side (which demands exactly two seats), map → mapping. A human
+// dot at +4 is the yes-and discriminator: with it, +2 is A and +3 is B building on A; without
+// it, the same two dots read as a one-panelist round judged by B. Everything else — human dots
+// off +4, model dots at +4, anything past +4, a judge with no panel, several dots at +3, a
+// lane the roster can't express — does not compile. Returns the compiled selection,
+// {noop: true} for an empty pattern (= the composer as it stands), or null.
 function compilePaint(dots) {
   if (!dots.length) return { noop: true };
   const roster = roomRoster();
-  const r1 = dots.filter((d) => d.frow === 1), r2 = dots.filter((d) => d.frow === 2);
-  const r3 = dots.filter((d) => d.frow === 3);
-  if (dots.some((d) => d.frow > 3)) return null;
+  const r1 = dots.filter((d) => d.frow === 2), r2 = dots.filter((d) => d.frow === 3);
+  const r3 = dots.filter((d) => d.frow === 4);
+  if (dots.some((d) => d.frow > 4 || d.frow < 2)) return null;
   if ([...r1, ...r2].some((d) => d.lane === "human" || !roster.includes(d.lane))) return null;
   if (r3.some((d) => d.lane !== "human") || r3.length > 1) return null;
   if (r3.length) {                                       // the human dot: this is a yes-and
@@ -1148,20 +1183,20 @@ function paintDerived() {
   const mode = currentMode();
   if (mode === "converse") {
     const target = $("#addressee").value || lastAiSpeaker() || roomRoster()[0];
-    return target ? [{ lane: target, frow: 1 }] : [];
+    return target ? [{ lane: target, frow: 2 }] : [];
   }
   if (mode === "fusion" || mode === "mapping" || mode === "side_by_side") {
     const dots = (mode === "side_by_side" ? pickedSeats() : pickedPanel())
-      .map((m) => ({ lane: m, frow: 1 }));
+      .map((m) => ({ lane: m, frow: 2 }));
     const judge = $(mode === "side_by_side" ? "#sxs-judge" : "#judge-pick").value;
     if (dots.length && judge) {
-      dots.push({ lane: judge, frow: 2,
+      dots.push({ lane: judge, frow: 3,
                   kind: mode === "side_by_side" ? "divergence" : mode === "mapping" ? "map" : "synthesis" });
     }
     return dots;
   }
   const a = $("#ya-a").value, b = $("#ya-b").value;      // yes_and
-  return a && b ? [{ lane: a, frow: 1 }, { lane: b, frow: 2 }, { lane: "human", frow: 3 }] : [];
+  return a && b ? [{ lane: a, frow: 2 }, { lane: b, frow: 3 }, { lane: "human", frow: 4 }] : [];
 }
 
 // A compiled paint writes THE SAME controls the picker edits, then goes through the picker's
@@ -1194,7 +1229,7 @@ function paintClick(lane, frow) {
   const hit = cur.find((d) => d.lane === lane && d.frow === frow);
   let next;
   if (!hit) {
-    next = [...cur, { lane, frow, ...(frow === 2 && lane !== "human" ? { kind: "synthesis" } : {}) }];
+    next = [...cur, { lane, frow, ...(frow === 3 && lane !== "human" ? { kind: "synthesis" } : {}) }];
   } else if (hit.kind) {
     const CYCLE = { synthesis: "divergence", divergence: "map", map: null };
     const nk = CYCLE[hit.kind];

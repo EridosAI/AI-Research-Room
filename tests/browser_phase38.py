@@ -8,6 +8,8 @@
   38.3: fixed-scale rows (ROW_H = clientHeight/12), a 5-row future zone with a live-edge
         hairline, rail scroll-pin mirroring the transcript rule, default-future ghost.
   38.4: paint-to-compose — future dots compile to the composer's selection state.
+  38.5: the round-head is explicit (ghost head @+1, now-connection, grammar offsets shift to
+        +2/+3/+4, no hits on the head row) and partial patterns render partial ghosts.
 
 Run:  python tests/browser_phase38.py   (needs playwright + chromium)
 """
@@ -117,6 +119,14 @@ def main():
         pr = _json("/rooms", "POST", {"title": "p38 paint"})["room"]["id"]
         _json(f"/rooms/{pr}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock_cli"})
         _json(f"/rooms/{pr}/run", "POST", {"mode": "converse", "prompt": "seed", "target": "mock"})
+
+        # 38.5A: a room that ENDS on a judge turn, so the now-connection must take the JUDGE's
+        # colour — which differs from the human colour (asserted), making origin-colouring of
+        # the now-connection falsifiable against "always human-coloured".
+        hd = _json("/rooms", "POST", {"title": "p38 head"})["room"]["id"]
+        _json(f"/rooms/{hd}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock_cli"})
+        _json(f"/rooms/{hd}/run", "POST", {"mode": "fusion", "prompt": "head fixture",
+                                           "panel": ["mock"], "judge": "mock_cli"})
 
         with sync_playwright() as p:
             br = p.chromium.launch(); page = br.new_page(viewport={"width": 1600, "height": 900})
@@ -256,25 +266,29 @@ def main():
             print("38.3B OK: rail pin — edge follows, mid-scroll preserved, switch force-pins")
 
             # ---- 38.3C: converse default ghost, auto AND explicit ------------------
+            # (offsets from the explicit round-head since 38.5: head @+1, target @+2)
             # auto: resolves to the actual last AI speaker (mock_cli), NOT participants[0] (mock)
             assert page.eval_on_selector("#addressee", "el => el.value") == "", "fixture: addressee is auto"
             ghost = page.locator("#traj-svg .traj-ghost-node")
-            assert ghost.count() == 1, f"converse ghosts exactly one ring: {ghost.count()}"
-            assert page.get_attribute(".traj-ghost-node", "data-lane") == "mock_cli", \
+            assert ghost.count() == 2, f"converse ghosts the head + one target ring: {ghost.count()}"
+            assert page.get_attribute('.traj-ghost-node[data-frow="1"]', "data-lane") == "human", \
+                "future row +1 is always the ghost round-head, on the human lane"
+            tgt = '.traj-ghost-node[data-frow="2"]'
+            assert page.get_attribute(tgt, "data-lane") == "mock_cli", \
                 "auto must resolve to the LAST AI speaker, not the first participant"
-            assert page.get_attribute(".traj-ghost-node", "data-frow") == "1"
-            assert page.get_attribute(".traj-ghost-node", "fill") == "none", "ghost vertices are hollow rings"
-            assert page.get_attribute(".traj-ghost-node", "stroke-opacity") == "0.25"
-            cy = float(page.get_attribute(".traj-ghost-node", "cy"))
-            assert abs(cy - 24.5 * row_h) < 0.6, f"the ghost lands on the first future row: {cy}"
-            assert page.locator("#traj-svg .traj-ghost-edge").count() == 1, "one ghost swerve from the live edge"
+            assert page.get_attribute(tgt, "fill") == "none", "ghost vertices are hollow rings"
+            assert page.get_attribute(tgt, "stroke-opacity") == "0.25"
+            cy = float(page.get_attribute(tgt, "cy"))
+            assert abs(cy - 25.5 * row_h) < 0.6, f"the target lands on future row +2: {cy}"
+            assert page.locator("#traj-svg .traj-ghost-edge").count() == 2, \
+                "the now-connection + the head→target swerve"
             # explicit addressee: the ghost moves with the picker
             page.select_option("#addressee", "mock")
             page.wait_for_timeout(80)
-            assert page.get_attribute(".traj-ghost-node", "data-lane") == "mock", \
+            assert page.get_attribute(tgt, "data-lane") == "mock", \
                 "the ghost must follow an explicit addressee"
             page.select_option("#addressee", "")
-            print("38.3C OK: converse ghost — auto resolves to the last AI speaker; explicit follows")
+            print("38.3C OK: converse ghost — head @+1; auto resolves to the last AI speaker; explicit follows")
 
             # ---- 38.3D: panel-mode default ghost = the full default fan -------------
             page.click("#mode-toggle")                 # #mode lives inside the disclosure (Phase 35)
@@ -283,13 +297,13 @@ def main():
             page.wait_for_timeout(100)
             rings = page.eval_on_selector_all(
                 "#traj-svg .traj-ghost-node", "els => els.map(e => [e.dataset.lane, e.dataset.frow])")
-            assert sorted(rings) == [["mock", "1"], ["mock", "2"], ["mock_cli", "1"]], \
-                f"fusion default ghost: both panelists at +1, the room judge at +2: {rings}"
-            assert page.locator("#traj-svg .traj-ghost-edge").count() == 4, \
-                "2 ghost fan-outs + 2 ghost fan-ins"
+            assert sorted(rings) == [["human", "1"], ["mock", "2"], ["mock", "3"], ["mock_cli", "2"]], \
+                f"fusion default ghost: head, both panelists at +2, the room judge at +3: {rings}"
+            assert page.locator("#traj-svg .traj-ghost-edge").count() == 5, \
+                "the now-connection + 2 ghost fan-outs + 2 ghost fan-ins"
             page.select_option("#mode", "converse")
             page.wait_for_timeout(80)
-            assert page.locator("#traj-svg .traj-ghost-node").count() == 1, \
+            assert page.locator("#traj-svg .traj-ghost-node").count() == 2, \
                 "switching the picker back re-derives the converse ghost (state, not gesture)"
             print("38.3D OK: fusion default ghost fans to the panel and converges on the room judge")
 
@@ -317,25 +331,29 @@ def main():
                 return page.locator("#traj-svg .traj-ghost-edge").count()
 
             # ---- 38.4A: converse row; a non-compiling pattern is inert --------------
+            # (grammar offsets from the head since 38.5: targets @+2, judge @+3, disc @+4)
             assert _json(f"/rooms/{pr}")["judge"] == "mock_cli", "fixture: room judge must be mock_cli"
             assert val("#mode") == "converse" and val("#addressee") == ""
-            assert gnodes() == [["mock", "1"]], f"auto converse derives one dot on the last AI: {gnodes()}"
-            paint("mock_cli", 1)                       # {mock, mock_cli}@+1: two dots, no judge
+            assert gnodes() == [["human", "1"], ["mock", "2"]], \
+                f"auto converse derives the head + one dot on the last AI: {gnodes()}"
+            paint("mock_cli", 2)                       # {mock, mock_cli}@+2: two dots, no judge
             assert val("#mode") == "converse", "a non-compiling paint must not change the mode"
             assert val("#addressee") == "", "a non-compiling paint must not change the addressee"
             assert page.text_content("#mode-toggle").startswith("converse"), "chip keeps the last valid state"
-            assert gnodes() == [["mock", "1"], ["mock_cli", "1"]], f"the dots still render, bare: {gnodes()}"
-            assert edges() == 0, "a non-compiling pattern must draw NO strokes"
-            paint("mock", 1)                           # toggle off → {mock_cli}@+1
+            assert gnodes() == [["human", "1"], ["mock", "2"], ["mock_cli", "2"]], \
+                f"the dots still render: {gnodes()}"
+            assert edges() == 3, "38.5B: the now-connection + a head→dot stroke per painted panelist"
+            paint("mock", 2)                           # toggle off → {mock_cli}@+2
             assert val("#mode") == "converse" and val("#addressee") == "mock_cli", \
-                "one model dot at +1 compiles to converse → that model"
-            assert gnodes() == [["mock_cli", "1"]] and edges() == 1, "the ghost re-derives from state"
-            print("38.4A OK: one dot @+1 = converse; a non-compiling pattern changes nothing")
+                "one model dot at +2 compiles to converse → that model"
+            assert gnodes() == [["human", "1"], ["mock_cli", "2"]] and edges() == 2, \
+                "the ghost re-derives from state"
+            print("38.4A OK: one dot @+2 = converse; a non-compiling pattern changes nothing")
 
             # ---- 38.4B: panel row; the judge dot's glyph cycle walks the modes -------
-            paint("mock", 1)                           # two dots @+1 (bare overlay again)
-            paint("mock", 2)                           # + a judge dot → fusion, judge = mock
-            assert val("#mode") == "fusion", "N dots @+1 + a judge @+2 compiles to a panel round"
+            paint("mock", 2)                           # two dots @+2 (overlay again)
+            paint("mock", 3)                           # + a judge dot → fusion, judge = mock
+            assert val("#mode") == "fusion", "N dots @+2 + a judge @+3 compiles to a panel round"
             assert page.text_content("#mode-toggle").startswith("fusion"), "painting updates the chip"
             assert not page.eval_on_selector("#composer-advanced", "el => el.classList.contains('hidden')"), \
                 "the compile goes through the picker pathway — the disclosure opens"
@@ -344,57 +362,58 @@ def main():
             jk = page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind")
             assert jk == "synthesis" and page.get_attribute("#traj-svg .traj-ghost-judge", "fill") != "none", \
                 f"a fresh judge dot wears the FILLED synthesis glyph: {jk}"
-            assert edges() == 4, "2 ghost fan-outs + 2 fan-ins"
-            paint("mock", 2)                           # cycle: synthesis → divergence
+            assert edges() == 5, "the now-connection + 2 ghost fan-outs + 2 fan-ins"
+            paint("mock", 3)                           # cycle: synthesis → divergence
             assert val("#mode") == "side_by_side", "the ring glyph IS side-by-side (exactly 2 seats)"
             assert checked("#sxs-pick") == ["mock", "mock_cli"] and val("#sxs-judge") == "mock"
             assert page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind") == "divergence"
-            paint("mock", 2)                           # cycle: divergence → map
+            paint("mock", 3)                           # cycle: divergence → map
             assert val("#mode") == "mapping", "the diamond glyph IS mapping"
             assert page.eval_on_selector("#traj-svg .traj-ghost-judge", "el => el.tagName") == "polygon"
-            paint("mock", 2)                           # cycle: map → off; two dots, no judge
+            paint("mock", 3)                           # cycle: map → off; two dots, no judge
             assert val("#mode") == "mapping", "cycling the judge OFF leaves the last valid state"
-            assert page.locator("#traj-svg .traj-ghost-judge").count() == 0 and edges() == 0
+            assert page.locator("#traj-svg .traj-ghost-judge").count() == 0
+            assert edges() == 3, "the partial fan-out still draws (38.5B); nothing converges"
             print("38.4B OK: glyph cycle filled→ring→diamond→off = fusion→side-by-side→mapping→(invalid)")
 
             # ---- 38.4C: the human dot discriminates yes-and from panel-of-1 ----------
-            paint("mock_cli", 1)                       # → {mock}@+1: converse → mock
+            paint("mock_cli", 2)                       # → {mock}@+2: converse → mock
             assert val("#mode") == "converse" and val("#addressee") == "mock"
-            paint("mock_cli", 2)                       # A@+1, B@+2, NO human dot
+            paint("mock_cli", 3)                       # A@+2, B@+3, NO human dot
             assert val("#mode") == "fusion", "A-then-B without the human dot is a 1-panel round judged by B"
             assert checked("#panel-pick") == ["mock"] and val("#judge-pick") == "mock_cli"
             assert page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind") == "synthesis"
-            paint("human", 3)                          # the discriminator
+            paint("human", 4)                          # the discriminator
             assert val("#mode") == "yes_and", "the human dot flips the reading to yes-and"
             assert val("#ya-a") == "mock" and val("#ya-b") == "mock_cli", "A first, B second"
             assert page.text_content("#mode-toggle").startswith("yes-and")
             assert page.locator("#traj-svg .traj-ghost-judge").count() == 0, \
                 "a yes-and second dot is a PLAIN vertex — no glyph"
             b_fill = page.eval_on_selector(
-                '#traj-svg .traj-ghost-node[data-lane="mock_cli"][data-frow="2"]',
+                '#traj-svg .traj-ghost-node[data-lane="mock_cli"][data-frow="3"]',
                 "el => el.getAttribute('fill')")
             assert b_fill == "none", f"B stays hollow: {b_fill}"
-            assert ["human", "3"] in gnodes() and edges() == 3, "the chain ends on the human ring"
-            paint("human", 3)                          # …and the discriminator works in reverse
+            assert ["human", "4"] in gnodes() and edges() == 4, "the chain ends on the human ring"
+            paint("human", 4)                          # …and the discriminator works in reverse
             assert val("#mode") == "fusion" and checked("#panel-pick") == ["mock"] \
                 and val("#judge-pick") == "mock_cli", "removing the human dot restores the judged reading"
             print("38.4C OK: the same A/B dots read panel-of-1 vs yes-and purely by the human dot")
 
             # ---- 38.4D: state-not-gesture; room-switch isolation ---------------------
-            paint("mock", 4)                           # +4 can never compile → bare overlay
-            assert ["mock", "4"] in gnodes() and val("#mode") == "fusion"
+            paint("mock", 5)                           # +5 can never compile → overlay
+            assert ["mock", "5"] in gnodes() and val("#mode") == "fusion"
             page.select_option("#mode", "converse")    # the PICKER moves → dots re-derive
             page.wait_for_timeout(80)
-            assert ["mock", "4"] not in gnodes(), "a picker change must drop the overlay (state, not gesture)"
-            assert gnodes() == [["mock", "1"]], f"converse ghost re-derived: {gnodes()}"
-            paint("mock", 4)
-            assert ["mock", "4"] in gnodes()
+            assert ["mock", "5"] not in gnodes(), "a picker change must drop the overlay (state, not gesture)"
+            assert gnodes() == [["human", "1"], ["mock", "2"]], f"converse ghost re-derived: {gnodes()}"
+            paint("mock", 5)
+            assert ["mock", "5"] in gnodes()
             open_room(page, "p38 fusion")
             page.wait_for_selector("#traj-svg .traj-fan-out")
-            assert ["mock", "4"] not in gnodes(), "paint must not follow you across rooms"
+            assert ["mock", "5"] not in gnodes(), "paint must not follow you across rooms"
             open_room(page, "p38 paint")
             page.wait_for_selector("#traj-svg .traj-hit-future")
-            assert ["mock", "4"] not in gnodes(), "paint resets on room switch — no stale overlay on return"
+            assert ["mock", "5"] not in gnodes(), "paint resets on room switch — no stale overlay on return"
             print("38.4D OK: picker re-derives the dots; the overlay neither crosses rooms nor survives a return")
 
             # ---- 38.4E: send consumes the paint --------------------------------------
@@ -405,7 +424,7 @@ def main():
             page.wait_for_function(
                 "document.querySelectorAll('#traj-svg .traj-hit').length === 4", timeout=30000)
             assert ["mock", "5"] not in gnodes(), "send must clear the paint (the round consumed it)"
-            assert edges() == 1, "back to the derived converse ghost"
+            assert edges() == 2, "back to the derived converse ghost (now-connection + head→target)"
             print("38.4E OK: send clears the paint and the future re-derives from state")
 
             # ---- 38.4F: the margin rail's future column; past clicks still jump ------
@@ -419,6 +438,81 @@ def main():
             page.click('.traj-hit[data-row="0"]')
             page.wait_for_selector("#stream .jump-flash")
             print("38.4F OK: margin future column opens + focuses the pane; click-to-jump untouched")
+
+            # ============ 38.5 — explicit round-head + partial ghosts ================
+            # ---- 38.5A: the ghost head, the now-connection, no hits on the head row --
+            open_room(page, "p38 head")
+            page.wait_for_selector("#traj-svg .traj-ghost-now")
+            hd_turns = _json(f"/rooms/{hd}")["turns"]
+            assert hd_turns[-1]["role"] == "judge", "fixture: the room must END on a judge turn"
+            judge_col = page.get_attribute('#traj-svg .traj-lane[data-lane="mock_cli"]', "stroke")
+            human_col = page.get_attribute('#traj-svg .traj-lane[data-lane="human"]', "stroke")
+            assert judge_col != human_col, "fixture: the judge colour must differ from the human colour"
+            assert page.locator("#traj-svg .traj-ghost-now").count() == 1
+            assert page.get_attribute("#traj-svg .traj-ghost-now", "stroke") == judge_col, \
+                "after a round, the now-connection carries the JUDGE's colour (origin rule)"
+            head = page.locator('#traj-svg .traj-ghost-node[data-frow="1"]')
+            assert head.count() == 1 and head.get_attribute("data-lane") == "human", \
+                "future row +1 is always the ghost round-head on the human lane"
+            assert head.get_attribute("fill") == "none", "the head is a hollow ring"
+            # the head row is NOT paintable — the hit grid starts at +2, structurally
+            per_row = page.evaluate("""() => {
+              const m = {};
+              document.querySelectorAll('.traj-hit-future[data-frow]').forEach((h) => {
+                m[h.dataset.frow] = (m[h.dataset.frow] || 0) + 1; });
+              return m; }""")
+            assert sorted(per_row.keys()) == ["2", "3", "4", "5"], \
+                f"the paint grid must start at +2 — no hit exists on the head row: {per_row}"
+            assert set(per_row.values()) == {3}, f"one hit per lane on every paintable row: {per_row}"
+            # converse-ended room: the now-connection takes the MODEL's colour
+            open_room(page, "p38 tall")
+            page.wait_for_selector("#traj-svg .traj-ghost-now")
+            tall_cli = page.get_attribute('#traj-svg .traj-lane[data-lane="mock_cli"]', "stroke")
+            assert page.get_attribute("#traj-svg .traj-ghost-now", "stroke") == tall_cli != human_col, \
+                "after converse, the now-connection carries the last AI speaker's colour"
+            assert page.locator('#traj-svg .traj-ghost-node[data-frow="1"]').count() == 1, \
+                "the ghost head is present after a converse-ended round too"
+            print("38.5A OK: ghost head @+1 (judge- and converse-ended), origin-coloured now-connection, grid starts at +2")
+
+            # ---- 38.5B: partial patterns render partial ghosts ------------------------
+            open_room(page, "p38 head")
+            page.wait_for_selector("#traj-svg .traj-hit-future")
+            assert val("#mode") == "converse" and val("#addressee") == ""
+            chip_before = page.text_content("#mode-toggle")
+            paint("mock", 2)                           # a second target: non-compiling, but connected
+            assert edges() == 3, "38.5B: now-connection + a head→dot stroke per painted panelist"
+            assert page.text_content("#mode-toggle") == chip_before, \
+                "partial rendering READS paint state — the chip is byte-identical"
+            assert val("#mode") == "converse" and val("#addressee") == "", \
+                "partial rendering writes NOTHING to selection state"
+            paint("mock_cli", 2)                       # → {mock}@+2: compiles converse → mock
+            assert val("#addressee") == "mock"
+            paint("mock_cli", 3)                       # + judge → fusion-of-1
+            assert val("#mode") == "fusion" and val("#judge-pick") == "mock_cli"
+            paint("mock", 2)                           # remove the panelist → judge-first: the ONE bare state
+            assert val("#mode") == "fusion", "a judge with no panel does not compile"
+            assert page.locator("#traj-svg .traj-ghost-judge").count() == 1 \
+                and page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind") == "synthesis", \
+                "judge-first paints a bare glyph"
+            assert edges() == 1, "…and NO strokes: a fan-in has no sources, head→judge would read as converse"
+            paint("mock", 2)                           # the panel arrives → the fan connects (compiles)
+            assert val("#mode") == "fusion" and edges() == 3, \
+                "now-connection + head→panelist + panelist→judge"
+            paint("mock_cli", 3)                       # cycle to divergence: 1 seat ≠ 2 → overlay again
+            assert val("#mode") == "fusion", "still the last valid state"
+            assert page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind") == "divergence"
+            assert edges() == 3, "the partial fan-in still draws in the overlay"
+            paint("mock", 5)                           # pin a never-compiling dot: both disc states stay overlay
+            assert edges() == 3 and ["mock", "5"] in gnodes()
+            paint("human", 4)                          # discriminator ON: +3 flips to plain, B→human appears
+            assert page.locator("#traj-svg .traj-ghost-judge").count() == 0, \
+                "with the discriminator, the +3 dot is a plain yes-and B — no glyph"
+            assert edges() == 4, "…and the B→human stroke appears"
+            assert val("#mode") == "fusion", "still zero state writes"
+            paint("human", 4)                          # discriminator OFF: glyph and fan-in return
+            assert page.get_attribute("#traj-svg .traj-ghost-judge", "data-kind") == "divergence"
+            assert edges() == 3, "the B→human stroke disappears"
+            print("38.5B OK: strokes connect as the shape is built; judge-first stays bare; the +3 dot follows the discriminator")
 
             assert not errs, f"page errors: {errs}"
             br.close()

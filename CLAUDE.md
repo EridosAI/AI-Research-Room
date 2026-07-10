@@ -53,9 +53,15 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
 - **Paint-to-compose (38.4) has no second store.** The future dots are a VIEW over the composer's
   selection state: a compiling paint writes the SAME DOM controls the picker edits and goes through
   the `#mode` change dispatch (chip, disclosure, redraw). `STATE.paintDots` is non-null ONLY while
-  the painted pattern does NOT compile — the bare overlay (dots, no strokes, composer untouched); it
-  clears on send, on room switch, and on any picker change. Never render a compiled pattern from the
-  gesture, and never make the overlay sticky.
+  the painted pattern does NOT compile — the overlay (composer untouched; since 38.5B it draws every
+  stroke whose endpoints both exist, so validity is visually just "the shape completed" — the chip
+  flip stays the only signal send behaviour changed). It clears on send, on room switch, and on any
+  picker change. Never render a compiled pattern from the gesture, never make the overlay sticky,
+  and never let the overlay branch write selection state.
+- **Future row +1 is the ghost round-head (38.5A)** — every round begins with a human turn, so the
+  head is always drawn (with the now-connection in the last forward speaker's colour) and is never
+  paintable: the hit grid starts at +2, structurally. Grammar offsets count from the head — targets
+  +2, judge +3, yes-and discriminator +4.
 - The graph's rows are **logical, not per-turn**: `trajRows` collapses a round's raw panelist turns
   onto one shared row (a blind concurrent panel is one event). Spacing runs on the row count. SVG has
   no z-index, so document order *is* depth — the paint order (margin → lanes → fans → trajectory →
