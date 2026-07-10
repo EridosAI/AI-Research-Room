@@ -174,14 +174,18 @@ Two layers, cleanly split:
   indicator and land in one step.
 - **Trajectory graph.** A toggleable rail (`graph`, top-right) draws the shape of the conversation:
   one vertical lane per speaker (human leftmost, then the roster; colours are the speaker dots), and a
-  single bright line that visits each turn's lane in order. The bright line traces **forward context
-  exactly** — it is a client-side mirror of `forward_turns()`, so raw panel answers hang off it as
-  **dim nodes** and never touch it. That makes a fusion round legible at a glance: the line dips out to
-  the human, fans into the blind panel, and re-converges on the judge. A **margin rail** on the right
-  hangs a connector at the row each side-question was asked beside, bracketing the turns it actually
-  read. Clicking any row scrolls the transcript to that turn. Display-only: it renders from turns the
-  client already has, and the transcript pane no longer yanks you to the bottom while you read
-  scrollback (it follows the bottom only if you were already there).
+  single bright line that visits each turn's lane in order, **swerving** out of one lane and into the
+  next the way a subway map draws a branch. The bright line traces **forward context exactly** — it is
+  a client-side mirror of `forward_turns()`, so a full-brightness stroke only ever touches a turn that
+  flows onward. A research round is drawn as the **event** it is rather than a step in a conversation:
+  the direct chord is suppressed and the round fans out from your prompt to every panelist, then back
+  in to the judge (converging strokes all in the judge's colour). The judge's glyph names the mode —
+  filled circle for fusion's *synthesis*, a ring for side-by-side's *divergence*, a diamond for a
+  *map*. A **margin rail** on the right runs a connector from your lane across to the rail at the row
+  each side-question was asked beside, bracketing the turns it actually read. Clicking any row scrolls
+  the transcript to that turn. Display-only: it renders from turns the client already has, and the
+  transcript pane no longer yanks you to the bottom while you read scrollback (it follows the bottom
+  only if you were already there).
 - **Token / context indicator.** A per-participant chip shows `~X / Y` (estimated context
   fill vs the provider's window) plus a running session total — exact from API `usage` where
   given, estimated (always `~`) for the Grok-CLI path.

@@ -43,6 +43,11 @@ executes every interaction pattern (rounds + a gate). Keys never live in the rep
 - **Never call `drawTrajGraph()` from `render()`** — `render()` runs once per animation frame while a
   converse streams. Drive the graph off `adoptRoom` (the single committed-turn mutation point), the
   toggle, a debounced resize, and `marginSend` (which returns no room view, so nothing else redraws).
+- Graph rendering has four knobs, all named at the top of the section: `OP_LANE` / `OP_MID` /
+  `OP_FULL` (the three opacity registers — brightness *encodes* forward context, so nothing but a
+  forward turn may be full-bright) and `CURVE_K` (Bézier handle length). No scattered literals.
+  Graph nodes must never carry class `turn` or `round`, and hit geometry (row rects, vertex circles)
+  stays a separate element from every drawn path.
 
 ## Deploy / run
 - `python -m web.server` → http://127.0.0.1:8765 (`--open` also launches a browser).

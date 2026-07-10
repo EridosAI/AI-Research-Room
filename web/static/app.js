@@ -640,11 +640,33 @@ function render() {
 function isForwardTurn(t) { return !(t.meta && t.meta.is_panelist_raw); }
 
 const TRAJ = { railW: 150, padX: 14, padTop: 12, padBottom: 12, minRowGap: 6, marginGap: 16 };
+
+// The three opacity registers. Brightness encodes context: full-bright touches ONLY forward
+// turns; the panel fan sits at the mid register (clearly above the lane guides, clearly below
+// the trajectory); the guides are the faintest thing on the rail. Single knobs — no literals.
+const OP_LANE = 0.30;    // lane guides
+const OP_MID = 0.55;     // fan edges + raw panelist dots
+const OP_FULL = 1.0;     // the trajectory and its vertices
+const CURVE_K = 0.45;    // Bézier handle length, as a fraction of the segment's dy
+
 const SVGNS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
   return e;
+}
+
+// A segment that peels off one lane and merges into another. The whole trick is VERTICAL
+// TANGENCY at both ends — control points share their endpoint's x — so a stroke leaves a lane
+// travelling along it and arrives travelling along the next, the way a subway map draws a
+// branch. A same-lane segment is the degenerate case: just a straight vertical.
+function swervePath(x0, y0, x1, y1) {
+  if (x0 === x1 || y0 === y1) return `M ${x0} ${y0} L ${x1} ${y1}`;
+  const dy = y1 - y0;
+  return `M ${x0} ${y0} C ${x0} ${y0 + CURVE_K * dy}, ${x1} ${y1 - CURVE_K * dy}, ${x1} ${y1}`;
+}
+function swerve(x0, y0, x1, y1, attrs) {
+  return svgEl("path", { d: swervePath(x0, y0, x1, y1), fill: "none", ...attrs });
 }
 // Model output is untrusted everywhere, including here: text reaches the SVG only as the
 // textContent of a <title>, never as markup.
@@ -661,6 +683,23 @@ function laneOf(t) { return t.role === "human" ? "human" : t.speaker; }
 
 // human leftmost, then the room roster in order, then any speaker only the transcript knows
 // about: a departed seat, a judge who was never a panelist, a promoted margin model.
+// Rounds, indexed by row. A research round is a fan-out/fan-in EVENT, not a step in a
+// conversation, and the graph draws it as one: head → every surviving panelist → judge.
+// Absent panelists produce no turn, so they produce no edge — correct by construction.
+function trajRounds(turns) {
+  const rounds = new Map();
+  turns.forEach((t, i) => {
+    const rid = (t.meta || {}).round_id;
+    if (!rid) return;
+    if (!rounds.has(rid)) rounds.set(rid, { head: -1, judge: -1, panels: [] });
+    const r = rounds.get(rid);
+    if (t.meta.is_panelist_raw) r.panels.push(i);
+    else if (t.role === "human") r.head = i;
+    else if (t.role === "judge") r.judge = i;
+  });
+  return rounds;
+}
+
 function trajLanes() {
   const lanes = ["human"];
   for (const k of (STATE.room && STATE.room.participants) || []) if (!lanes.includes(k)) lanes.push(k);
@@ -700,42 +739,105 @@ function drawTrajGraph() {
   drawTrajBody(svg, { n, gap, height, lanes, laneX, rowY, marginX });
 }
 
+// A vertex. The judge carries the round's KIND in its shape — the one cheap signal that tells
+// fusion from side-by-side from mapping at a glance, since all three draw the same fan.
+// `judge_kind` is absent on pre-Phase-26 judge turns; those read as synthesis, as they do in
+// the transcript itself (renderRound defaults the label the same way).
+const JUDGE_GLYPH = { synthesis: "circle", divergence: "ring", map: "diamond" };
+
+function trajNode(t, x, y, color, fwd) {
+  const common = {
+    class: "traj-node", "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
+    "fill-opacity": fwd ? OP_FULL : OP_MID,
+  };
+  if (t.role !== "judge") return svgEl("circle", { cx: x, cy: y, r: 2.5, fill: color, ...common });
+
+  const kind = (t.meta && t.meta.judge_kind) || "synthesis";
+  const glyph = JUDGE_GLYPH[kind] || "circle";
+  common["data-judge-kind"] = kind;
+  if (glyph === "ring") {                                    // side-by-side: exposes, doesn't merge
+    return svgEl("circle", { cx: x, cy: y, r: 2.8, fill: "none",
+                             stroke: color, "stroke-width": 1.5, "stroke-opacity": OP_FULL, ...common });
+  }
+  if (glyph === "diamond") {                                 // mapping: a map, not a verdict
+    const r = 3.2;
+    return svgEl("polygon", { points: `${x},${y - r} ${x + r},${y} ${x},${y + r} ${x - r},${y}`,
+                              fill: color, ...common });
+  }
+  return svgEl("circle", { cx: x, cy: y, r: 2.5, fill: color, ...common });
+}
+
 function drawTrajBody(svg, geom) {
   const { gap, height, lanes, laneX, rowY } = geom;
+  const turns = STATE.turns;
+  const rounds = trajRounds(turns);
+  const xy = (i) => ({ x: laneX(laneOf(turns[i])), y: rowY(i) });
 
   // lane guides — thin, solid, dot-coloured, well behind everything else
   for (const key of lanes) {
     svg.appendChild(svgTitle(svgEl("line", {
       x1: laneX(key), y1: 0, x2: laneX(key), y2: height, class: "traj-lane",
-      stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": 0.3,
+      stroke: colorOf(key), "stroke-width": 1, "stroke-opacity": OP_LANE,
     }), key));
   }
 
+  // The fan: head → every surviving panelist → judge. Destination colour, as everywhere else,
+  // so the fan-in reads as N same-coloured strokes converging on the judge.
+  for (const r of rounds.values()) {
+    if (!r.panels.length) continue;              // nothing to fan; the chord below stays
+    for (const p of r.panels) {
+      if (r.head >= 0) {
+        const a = xy(r.head), b = xy(p);
+        svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
+          class: "traj-fan-out", stroke: colorOf(laneOf(turns[p])),
+          "stroke-width": 1, "stroke-opacity": OP_MID,
+          "data-from": turns[r.head].id, "data-to": turns[p].id,
+        }));
+      }
+      if (r.judge >= 0) {
+        const a = xy(p), b = xy(r.judge);
+        svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
+          class: "traj-fan-in", stroke: colorOf(laneOf(turns[r.judge])),
+          "stroke-width": 1, "stroke-opacity": OP_MID,
+          "data-from": turns[p].id, "data-to": turns[r.judge].id,
+        }));
+      }
+    }
+  }
+
+  // Is this forward segment the head→judge chord of a round that actually fanned? Then the fan
+  // already carries it, and a direct chord would misread as "the conversation skipped to the
+  // judge". A round whose panel turns are all absent or rolled away keeps its chord — the
+  // trajectory must never simply break.
+  const isFannedChord = (a, b) => {
+    const rid = (turns[a].meta || {}).round_id;
+    if (!rid || (turns[b].meta || {}).round_id !== rid) return false;
+    if (turns[a].role !== "human" || turns[b].role !== "judge") return false;
+    const r = rounds.get(rid);
+    return !!(r && r.panels.length);
+  };
+
   // The bright line traces forward context exactly. Each segment is coloured by the turn
   // it arrives at, so a swerve reads as the next speaker taking the floor.
-  let prev = null;
-  STATE.turns.forEach((t, i) => {
+  let prev = -1;
+  turns.forEach((t, i) => {
     if (!isForwardTurn(t)) return;
-    const pt = { x: laneX(laneOf(t)), y: rowY(i) };
-    if (prev) {
-      svg.appendChild(svgEl("line", {
-        x1: prev.x, y1: prev.y, x2: pt.x, y2: pt.y, class: "traj-line",
-        stroke: colorOf(laneOf(t)), "stroke-width": 1.5, "stroke-linecap": "round",
+    if (prev >= 0 && !isFannedChord(prev, i)) {
+      const a = xy(prev), b = xy(i);
+      svg.appendChild(swerve(a.x, a.y, b.x, b.y, {
+        class: "traj-line", stroke: colorOf(laneOf(t)), "stroke-width": 1.5,
+        "stroke-opacity": OP_FULL, "data-from": turns[prev].id, "data-to": t.id,
       }));
     }
-    prev = pt;
+    prev = i;
   });
 
-  // nodes: bright vertices on the line, dim nodes for the raw panel fan-out. A judge who
-  // also sat on the panel gets BOTH on its lane — the fan-out re-converging, by design.
-  STATE.turns.forEach((t, i) => {
+  // nodes: bright vertices on the line, mid-register dots for the raw panel fan. A judge who
+  // also sat on the panel gets BOTH on its lane — the fan re-converging, by design.
+  turns.forEach((t, i) => {
     const fwd = isForwardTurn(t);
-    const c = colorOf(laneOf(t));
-    const node = svgEl("circle", {
-      cx: laneX(laneOf(t)), cy: rowY(i), r: 2.5, fill: c,
-      "fill-opacity": fwd ? 1 : 0.35, class: "traj-node",
-      "data-turn-id": t.id, "data-forward": fwd ? "1" : "0",
-    });
+    const p = xy(i);
+    const node = trajNode(t, p.x, p.y, colorOf(laneOf(t)), fwd);
     svgTitle(node, `${laneOf(t)}: ${(t.text || "").slice(0, 80)}`);
     svg.appendChild(node);
   });
@@ -766,7 +868,7 @@ function drawTrajBody(svg, geom) {
 const BRACKET_CAP = 3;   // px the bracket overshoots its end rows, so last_1 still draws
 
 function drawTrajMargin(svg, geom) {
-  const { rowY, marginX, height } = geom;
+  const { laneX, rowY, marginX, height } = geom;
   const margins = STATE.marginTurns || [];
   const promoted = STATE.turns.filter((t) => t.meta && t.meta.from_margin);
   if (!margins.length && !promoted.length) return;
@@ -779,10 +881,17 @@ function drawTrajMargin(svg, geom) {
   const rowOf = new Map();                       // turn id → row index, current transcript only
   STATE.turns.forEach((t, i) => rowOf.set(t.id, i));
   const forwardRows = STATE.turns.map((t, i) => (isForwardTurn(t) ? i : -1)).filter((i) => i >= 0);
+  const humanX = laneX("human");
 
-  const connector = (y, cls) => svgEl("line", {
-    x1: marginX, y1: y, x2: marginX - TRAJ.marginGap, y2: y, class: cls,
+  // A connector is an indicator, not a trajectory: straight, never curved. It spans the full
+  // width from its origin lane to the rail. Terminal dot in the CONNECTOR's colour, not the
+  // lane's — the side-question came from you, but it isn't a turn in the conversation.
+  const connector = (y, cls, x0) => svgEl("line", {
+    x1: marginX, y1: y, x2: x0, y2: y, class: cls,
     stroke: DOT_DEFAULT, "stroke-width": 1, "stroke-opacity": 0.4,
+  });
+  const originDot = (y) => svgEl("circle", {
+    cx: humanX, cy: y, r: 2.5, fill: DOT_DEFAULT, "fill-opacity": 0.4, class: "traj-margin-dot",
   });
 
   for (const q of margins) {
@@ -795,7 +904,8 @@ function drawTrajMargin(svg, geom) {
       if (!rows.length) continue;                // every windowed turn was rolled back — draw nothing
       const lo = Math.min(...rows), hi = Math.max(...rows);
       const label = `margin (${meta.window || "window"}): ${(q.text || "").slice(0, 80)}`;
-      svg.appendChild(svgTitle(connector(rowY(hi), "traj-connector"), label));
+      svg.appendChild(svgTitle(connector(rowY(hi), "traj-connector", humanX), label));
+      svg.appendChild(originDot(rowY(hi)));
       // BRACKET_CAP encloses the windowed rows rather than ending on their centres — and it is
       // what makes a single-row window (last_1) a visible tick instead of a zero-length line.
       svg.appendChild(svgTitle(svgEl("line", {
@@ -808,15 +918,17 @@ function drawTrajMargin(svg, geom) {
     // legacy: best-effort ts correlation, clamped into range. Never throws, never brackets.
     const anchor = forwardRows.filter((i) => (STATE.turns[i].ts || "") <= (q.ts || "")).pop();
     if (anchor === undefined) continue;
-    svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx"),
+    svg.appendChild(svgTitle(connector(rowY(anchor), "traj-connector traj-approx", humanX),
       `margin (${meta.window || "window"}, approximate): ${(q.text || "").slice(0, 80)}`));
+    svg.appendChild(originDot(rowY(anchor)));
   }
 
-  // the one deliberate margin → main backflow, drawn as a connector INTO the transcript
+  // The one deliberate margin → main backflow. It already terminates on a bright forward vertex
+  // (the promoted note's own), so it gets no origin dot — that would double-mark the row.
   for (const t of promoted) {
     const r = rowOf.get(t.id);
     if (r === undefined) continue;
-    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted"),
+    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted", laneX(laneOf(t))),
       `promoted from margin: ${(t.text || "").slice(0, 80)}`));
   }
 }

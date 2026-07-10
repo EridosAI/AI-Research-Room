@@ -16,6 +16,7 @@ Run:  python tests/browser_phase37.py   (needs playwright + chromium)
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,29 @@ def main():
         _json(f"/rooms/{ya}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
         _json(f"/rooms/{ya}/run", "POST", {"mode": "yes_and", "prompt": "build on this",
                                            "seats": ["mock", "mock_cli"]})
+
+        # the other two panel modes, for the judge glyph (37.5B)
+        sxs = _json("/rooms", "POST", {"title": "p37 sxs"})["room"]["id"]
+        _json(f"/rooms/{sxs}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        _json(f"/rooms/{sxs}/run", "POST", {"mode": "side_by_side", "prompt": "compare",
+                                            "seats": ["mock", "mock_cli"], "judge": "mock"})
+        mp = _json("/rooms", "POST", {"title": "p37 map"})["room"]["id"]
+        _json(f"/rooms/{mp}", "PUT", {"participants": ["mock", "mock_cli"], "judge": "mock"})
+        _json(f"/rooms/{mp}/run", "POST", {"mode": "mapping", "prompt": "map this",
+                                           "panel": ["mock", "mock_cli"], "judge": "mock"})
+
+        # A round whose panel turns are all gone (absent, or rolled away) — the chord-suppression
+        # exception. Also carries a judge with NO judge_kind (a pre-Phase-26 turn), which must
+        # still render as synthesis. Hand-seeded: run_mode cannot produce a panel-less round.
+        bare = _json("/rooms", "POST", {"title": "p37 bare"})["room"]["id"]
+        _json(f"/rooms/{bare}", "PUT", {"participants": ["mock"], "judge": "mock"})
+        with (HOME / "vault" / bare / "main.jsonl").open("w", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "bare-h", "ts": "2026-07-10T00:00:00Z", "mode": "research",
+                                "role": "human", "speaker": "human", "text": "ask",
+                                "meta": {"round_id": "r1"}}) + "\n")
+            f.write(json.dumps({"id": "bare-j", "ts": "2026-07-10T00:00:01Z", "mode": "research",
+                                "role": "judge", "speaker": "mock", "text": "verdict",
+                                "meta": {"round_id": "r1"}}) + "\n")
 
         # A genuinely TALL room. The scroll assertions below are only meaningful in a
         # transcript that actually overflows #stream — a short one makes every scroll check
@@ -192,8 +216,13 @@ def main():
                 '.traj-node[data-forward="0"]', "els => els.map(e => e.dataset.turnId)"))
             assert got_fwd == fwd_ids, f"bright vertices != forward turns\n{got_fwd}\n{fwd_ids}"
             assert got_dim == raw_ids, f"dim nodes != is_panelist_raw turns\n{got_dim}\n{raw_ids}"
-            dim_op = page.get_attribute('.traj-node[data-forward="0"]', "fill-opacity")
-            assert float(dim_op) < 0.5, f"dim nodes should be dim: {dim_op}"
+            dim_op = float(page.get_attribute('.traj-node[data-forward="0"]', "fill-opacity"))
+            bright_op = float(page.get_attribute('.traj-node[data-forward="1"]', "fill-opacity"))
+            lane_op = float(page.get_attribute(".traj-lane", "stroke-opacity"))
+            assert lane_op < dim_op < bright_op, \
+                f"three registers, in order: lane {lane_op} < panel {dim_op} < forward {bright_op}"
+            assert dim_op == 0.55 and bright_op == 1 and lane_op == 0.3, \
+                f"registers should be the named OP_* constants: {lane_op}/{dim_op}/{bright_op}"
 
             # the judge is also a panelist → its lane carries BOTH a dim node and a bright vertex
             judge = next(t for t in fus_turns if t["role"] == "judge")
@@ -233,6 +262,97 @@ def main():
             page.wait_for_selector("#stream .turn")
             assert page.locator("#stream .turn[data-turn-id]").count() == n_turns, "converse turns not anchored"
             print("37.3D OK: data-turn-id on prompt/panel/synthesis/converse, never on .round")
+
+            # ================= 37.5 — fan, glyph, curves =========================
+            # ---- 37.5A: a round is a fan-out/fan-in event, not a chord -------------
+            open_room(page, "p37 fusion")
+            page.wait_for_selector("#traj-svg .traj-node")
+            head = next(t for t in fus_turns if t["role"] == "human")
+            judge = next(t for t in fus_turns if t["role"] == "judge")
+            panels = [t for t in fus_turns if (t["meta"] or {}).get("is_panelist_raw")]
+            assert page.locator(f'.traj-line[data-from="{head["id"]}"][data-to="{judge["id"]}"]').count() == 0, \
+                "a fanned round must NOT also draw a direct bright human→judge chord"
+            assert page.locator("#traj-svg .traj-line").count() == 0, \
+                "the fusion fixture's only forward pair IS the suppressed chord"
+            assert page.locator("#traj-svg .traj-fan-out").count() == len(panels), "one fan-out edge per panelist"
+            assert page.locator("#traj-svg .traj-fan-in").count() == len(panels), "one fan-in edge per panelist"
+            for p in panels:      # edges are anchored to real turns, not just counted
+                assert page.locator(f'.traj-fan-out[data-from="{head["id"]}"][data-to="{p["id"]}"]').count() == 1
+                assert page.locator(f'.traj-fan-in[data-from="{p["id"]}"][data-to="{judge["id"]}"]').count() == 1
+            fan_op = float(page.get_attribute(".traj-fan-out", "stroke-opacity"))
+            assert fan_op == 0.55, f"fan edges sit at the mid register: {fan_op}"
+
+            # Destination colour, both ways. Assert on the panelist that ISN'T the judge — for the
+            # judge's own panel turn the two colours coincide and nothing is being tested.
+            other = next(p for p in panels if p["speaker"] != judge["speaker"])
+            judge_col = page.get_attribute(f'.traj-node[data-turn-id="{judge["id"]}"]', "fill")
+            other_col = page.get_attribute(f'.traj-node[data-turn-id="{other["id"]}"]', "fill")
+            assert judge_col != other_col, "fixture must give the judge and this panelist different colours"
+            assert page.get_attribute(f'.traj-fan-out[data-to="{other["id"]}"]', "stroke") == other_col, \
+                "a fan-out edge takes its destination panelist's colour"
+            assert page.get_attribute(f'.traj-fan-in[data-from="{other["id"]}"]', "stroke") == judge_col, \
+                "a fan-in edge takes its destination judge's colour — N converging strokes of one colour"
+
+            # judge-as-panelist: its own fan-in runs straight DOWN its lane to the bright vertex
+            same_lane = next(p for p in panels if p["speaker"] == judge["speaker"])
+            d_same = page.get_attribute(f'.traj-fan-in[data-from="{same_lane["id"]}"]', "d")
+            assert " C " not in d_same and " L " in d_same, \
+                f"a same-lane fan-in is a straight vertical, not a curve: {d_same}"
+            print(f"37.5A OK: fusion round draws {len(panels)} fan-out + {len(panels)} fan-in, no chord")
+
+            # ---- 37.5A: a round with NO surviving panel turns keeps its chord ------
+            open_room(page, "p37 bare")
+            page.wait_for_selector("#traj-svg .traj-node")
+            assert page.locator('.traj-line[data-from="bare-h"][data-to="bare-j"]').count() == 1, \
+                "a panel-less round must keep its direct segment — the line may never break"
+            assert page.locator("#traj-svg .traj-fan-out").count() == 0
+            assert page.locator("#traj-svg .traj-fan-in").count() == 0
+            print("37.5A OK: a round with no surviving panel turns keeps an unbroken bright line")
+
+            # ---- 37.5B: the judge glyph carries the round's kind -------------------
+            glyph_of = lambda: page.eval_on_selector(
+                "#traj-svg .traj-node[data-judge-kind]",
+                "el => [el.tagName.toLowerCase(), el.getAttribute('data-judge-kind'), el.getAttribute('fill')]")
+            tag, kind, fill = glyph_of()
+            assert (tag, kind) == ("circle", "synthesis") and fill != "none", \
+                f"a judge turn with NO judge_kind must read as synthesis: {tag}/{kind}/{fill}"
+            assert "judge_kind" not in (_json(f"/rooms/{bare}")["turns"][1]["meta"] or {}), \
+                "the bare fixture must genuinely lack judge_kind, or the check is vacuous"
+            open_room(page, "p37 fusion"); page.wait_for_selector("#traj-svg .traj-node[data-judge-kind]")
+            tag, kind, fill = glyph_of()
+            assert (tag, kind) == ("circle", "synthesis") and fill != "none", f"fusion → filled circle: {tag}/{kind}/{fill}"
+            open_room(page, "p37 sxs"); page.wait_for_selector("#traj-svg .traj-node[data-judge-kind]")
+            tag, kind, fill = glyph_of()
+            assert (tag, kind, fill) == ("circle", "divergence", "none"), f"side-by-side → ring: {tag}/{kind}/{fill}"
+            assert page.get_attribute(".traj-node[data-judge-kind]", "stroke-width") == "1.5"
+            open_room(page, "p37 map"); page.wait_for_selector("#traj-svg .traj-node[data-judge-kind]")
+            tag, kind, _ = glyph_of()
+            assert (tag, kind) == ("polygon", "map"), f"mapping → diamond: {tag}/{kind}"
+            print("37.5B OK: judge glyph = circle / ring / diamond by judge_kind (absent → synthesis)")
+
+            # ---- 37.5D: lane changes swerve; vertical tangency at both ends --------
+            open_room(page, "p37 conv")
+            page.wait_for_selector("#traj-svg .traj-line")
+            ds = page.eval_on_selector_all("#traj-svg .traj-line", "els => els.map(e => [e.tagName.toLowerCase(), e.getAttribute('d')])")
+            curved = [d for tag, d in ds if " C " in d]
+            assert all(tag == "path" for tag, _ in ds), f"trajectory segments must be <path>: {ds}"
+            assert curved, "a human→model lane change must curve"
+            for d in curved:
+                m = re.match(r"^M ([\d.]+) ([\d.]+) C ([\d.]+) [\d.]+, ([\d.]+) [\d.]+, ([\d.]+) ([\d.]+)$", d)
+                assert m, f"unexpected path shape: {d}"
+                x0, _y0, c1x, c2x, x1, _y1 = m.groups()
+                assert c1x == x0 and c2x == x1, \
+                    f"control points must share their endpoint's x (vertical tangency): {d}"
+                assert x0 != x1, "a curved segment must actually change lane"
+            caps = page.eval_on_selector_all(
+                "#traj-svg .traj-lane, #traj-svg .traj-line, #traj-svg .traj-node",
+                "els => [...new Set(els.map(e => getComputedStyle(e).strokeLinecap))]")
+            assert caps == ["round"], f"all graph strokes carry round linecaps: {caps}"
+            # hit geometry stays separate from the drawn paths (the deferred drag-to-direct layer)
+            assert page.locator("#traj-svg path[data-turn-id]").count() == 0, \
+                "no path may be a hit target — hit rects and vertex circles own that"
+            assert page.eval_on_selector(".traj-hit", "el => el.tagName.toLowerCase()") == "rect"
+            print("37.5D OK: lane changes are vertically-tangent Béziers; hit geometry stays separate")
 
             # ---- 37.3E/F run in the TALL room: #stream must genuinely overflow, or every
             #      scroll assertion below is vacuously true (scrollTop clamps to 0 at maxScroll=0).
@@ -350,6 +470,29 @@ def main():
             assert geo["y1"] < geo["lastRow"] < geo["y2"], f"bracket must straddle its row: {geo}"
             assert geo["y2"] - geo["y1"] == 6, f"a last_1 bracket is a 6px tick, not a zero-length line: {geo}"
             print("37.4A OK: margin connector + bracket appear live, anchored by window_ids")
+
+            # ---- 37.5C: the connector spans human lane → rail, with a terminal dot ----
+            span = page.evaluate("""() => {
+              const c = document.querySelector('.traj-connector');
+              const d = document.querySelector('.traj-margin-dot');
+              const rail = document.querySelector('.traj-margin-rail');
+              const humanLane = document.querySelector('.traj-lane');   // human is drawn first
+              return { tag: c.tagName.toLowerCase(),
+                       y1: +c.getAttribute('y1'), y2: +c.getAttribute('y2'),
+                       cx1: +c.getAttribute('x1'), cx2: +c.getAttribute('x2'),
+                       railX: +rail.getAttribute('x1'), humanX: +humanLane.getAttribute('x1'),
+                       dotX: +d.getAttribute('cx'), dotY: +d.getAttribute('cy'),
+                       dotFill: d.getAttribute('fill'), stroke: c.getAttribute('stroke') };
+            }""")
+            assert span["tag"] == "line" and span["y1"] == span["y2"], \
+                f"the connector is a straight horizontal indicator, never a curve: {span}"
+            assert {span["cx1"], span["cx2"]} == {span["railX"], span["humanX"]}, \
+                f"the connector must span human lane → margin rail: {span}"
+            assert span["dotX"] == span["humanX"] and span["dotY"] == span["y1"], \
+                f"the terminal dot sits on the human lane at the anchor row: {span}"
+            assert span["dotFill"] == span["stroke"], \
+                f"the terminal dot takes the CONNECTOR's colour, not the human lane's: {span}"
+            print("37.5C OK: connector spans human lane → rail with a terminal dot in connector grey")
 
             # ---- 37.4B: rollback past the windowed rows → clamp or vanish, no crash ----
             before = len(_json(f"/rooms/{conv}")["turns"])

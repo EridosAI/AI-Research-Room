@@ -311,7 +311,11 @@ Three deliberate "not yet"s:
 - **The graph as a second producer of the mode-selection object.** `run_mode`'s docstring has always
   anticipated this: drag on the rail to shape the *next* round (who answers, who judges) instead of
   using the composer dropdown. The selection object is already decoupled from execution, so this is a
-  new producer, not a new execution path. Its own phase.
+  new producer, not a new execution path. The natural first slice is drag-from-human-dot → lane,
+  writing the existing session addressee. Phase 37.5's hit geometry (row rects + vertex circles) is
+  kept as *separate elements* from the drawn paths precisely so curves never complicate this.
+- **Fan-edge hover affordances.** Highlighting a round's whole fan on hover would make a dense
+  transcript's rounds pop out individually. Nice, not now.
 - **Distinct yes-and pair marking.** Yes-and writes two ordinary forward `converse` turns with no
   `round_id` and no marker on the turns themselves — the mode name survives only in the round-head's
   `meta.selection.mode`, which is **absent on pre-Phase-27 rooms**. v1 therefore draws the pair as what

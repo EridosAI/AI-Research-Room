@@ -344,7 +344,9 @@ input, textarea { color: var(--text-primary); }
    Phase-34 clamp budget. Colours come from the speaker dots, not the theme. ===== */
 .traj-rail { flex: 0 0 auto; width: 150px; height: 100vh; overflow-y: auto; overflow-x: hidden;
   background: var(--bg-secondary); border-right: 1px solid var(--border-subtle); }
-.traj-svg { display: block; width: 100%; }
+/* uniform thin strokes; the curvature carries the elegance, not a taper. linecap/linejoin are
+   inherited SVG presentation properties, so setting them on the root covers every stroke. */
+.traj-svg { display: block; width: 100%; stroke-linecap: round; stroke-linejoin: round; }
 .traj-hit { fill: transparent; cursor: pointer; }
 .traj-node { cursor: pointer; }
 #traj-toggle.active { border-color: var(--accent-border); color: var(--accent-text); }
