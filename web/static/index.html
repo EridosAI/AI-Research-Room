@@ -46,6 +46,7 @@
         <button id="rollback-btn" title="undo the last round (removes its turns; recoverable)" disabled>↶ undo round</button>
         <button id="traj-toggle" title="trajectory graph — the shape of the conversation">graph</button>
         <button id="margin-toggle" title="open the margin (side-channel)" disabled>margin</button>
+        <button id="code-toggle" title="code seat pane + diplomatic outbox" disabled>code</button>
         <button id="room-settings-btn" title="this room's models &amp; judge" disabled>models</button>
       </div>
     </header>
@@ -259,6 +260,27 @@
           <button id="margin-send">ask</button>
         </div>
         <div id="margin-status" class="status"></div>
+      </aside>
+
+      <!-- code seat pane (Phase 39): window-mode seat + diplomatic outbox -->
+      <div id="code-splitter" class="margin-splitter hidden"></div>
+      <aside id="code-pane" class="margin code-pane hidden">
+        <div class="margin-head">
+          <span class="margin-title">code</span>
+          <select id="code-seat" title="code seat (agent provider)"></select>
+          <select id="channel-mode" title="outbox approval mode">
+            <option value="auto">auto</option>
+            <option value="control">control</option>
+          </select>
+          <button id="code-close" title="hide the code pane">×</button>
+        </div>
+        <div id="code-meta" class="code-meta"></div>
+        <div id="outbox-list" class="outbox-list"></div>
+        <div class="margin-composer">
+          <textarea id="code-input" rows="2" placeholder="message the code seat… (Enter to send)"></textarea>
+          <button id="code-send">send</button>
+        </div>
+        <div id="code-status" class="status"></div>
       </aside>
     </div>
   </div>

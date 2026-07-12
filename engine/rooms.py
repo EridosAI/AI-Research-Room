@@ -90,6 +90,13 @@ def _default_meta(room_id: str, title: str) -> dict:
         "reasoning_effort": {},   # {panelist_key: "high"|"medium"|"low"} overrides; empty = model default
         "artifacts_dir": "",  # per-room artifacts dir override; "" = inherit the global (Phase 32.1)
         "viewer_width": None, # per-room artifact-viewer pane width (px); null = CSS default (Phase 33.2)
+        # Phase 39 — OpenCode code seat + diplomatic channel
+        "code_seats": [],           # agent provider keys; NEVER mixed into blind panels
+        "workspace_path": "",       # native-Linux cwd for opencode serve; "" = default ~/rooms/<id>/workspace
+        "channel_mode": "auto",     # auto | control — outbox approval policy
+        "outbox": [],               # pending diplomatic crossings
+        "opencode_port": None,      # live serve port (re-attach)
+        "opencode_session_id": None,
         "ts": _now(),
     }
 
@@ -148,7 +155,9 @@ def load_room(room_id: str) -> dict:
 
 
 _MUTABLE = {"title", "participants", "judge", "margin_model",
-            "splitter_width", "last_read_pos", "tags", "reasoning_effort", "artifacts_dir", "viewer_width"}
+            "splitter_width", "last_read_pos", "tags", "reasoning_effort", "artifacts_dir", "viewer_width",
+            "code_seats", "workspace_path", "channel_mode", "outbox",
+            "opencode_port", "opencode_session_id"}
 
 
 def update_room(room_id: str, **fields) -> dict:

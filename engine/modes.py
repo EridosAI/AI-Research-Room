@@ -187,16 +187,28 @@ def _attached_docs(turns: list[dict]) -> list[str]:
 
 
 # ---- shared primitives (extracted, not rewritten) --------------------------
+def _is_agent(key: str) -> bool:
+    """backend==agent seats live in code_seats and must never be blind panelists (R1)."""
+    try:
+        return providers.provider(key).backend == "agent"
+    except ValueError:
+        return False
+
+
+def _non_agent(keys: list[str] | None) -> list[str]:
+    return [k for k in (keys or []) if not _is_agent(k)]
+
+
 def _panelist(speaker: str, payload: dict, effort: str, reasoning_effort: str | None = None,
               *, tools: bool = True, max_tokens: int | None = None, cache: bool = False,
-              artifacts_dir: str | None = None):
+              artifacts_dir: str | None = None, room_id: str | None = None):
     """Run one panelist. Returns (speaker, ModelReply|None, error). Never raises —
     a failure becomes an absence, captured for the judge prompt."""
     try:
         reply = providers.call_model(speaker, payload, tools=tools, effort=effort,
                                      max_tokens=(max_tokens or settings.RESEARCH_MAX_TOKENS),
                                      reasoning_effort=reasoning_effort, cache=cache,
-                                     artifacts_dir=artifacts_dir)
+                                     artifacts_dir=artifacts_dir, room_id=room_id)
         if not reply.text.strip():
             return speaker, None, "empty answer"
         return speaker, reply, None
@@ -291,26 +303,29 @@ def _stamp_artifacts(meta: dict, room_id: str, text: str, artifacts_dir: str | N
 
 
 def _call_judge(judge: str, payload: dict, effort: str, reasoning_effort: str | None = None,
-                artifacts_dir: str | None = None):
+                artifacts_dir: str | None = None, room_id: str | None = None):
     try:
         return providers.call_model(judge, payload, tools=True, effort=effort,
                                     max_tokens=settings.RESEARCH_MAX_TOKENS,
-                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir)
+                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir,
+                                    room_id=room_id)
     except providers.RunnerUnavailable:
         return providers.call_model(judge, payload, tools=False,
                                     max_tokens=settings.RESEARCH_MAX_TOKENS,
-                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir)
+                                    reasoning_effort=reasoning_effort, artifacts_dir=artifacts_dir,
+                                    room_id=room_id)
 
 
 # ---- the executor -----------------------------------------------------------
 def _resolve_participants(rnd: Round, selection: dict, room: dict, target: str | None) -> list[str]:
+    # R1: agent seats never become blind panelists (or accidental panel roster members).
     if rnd.participants == "subset":
-        return list(selection["seats"])
+        return _non_agent(list(selection["seats"]))
     if rnd.participants == "one":
         if rnd.seat is not None:                          # yes-and's ordered pair: pick by index
             return [selection["seats"][rnd.seat]]
         return [target]
-    return list(selection.get("panel") or room["participants"])      # "all"
+    return _non_agent(list(selection.get("panel") or room["participants"]))  # "all"
 
 
 def _round_payload(rnd: Round, speaker: str, prompt: str, doc_block: str,
@@ -388,13 +403,15 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                 meta["absent"] = [{"speaker": s, "error": e} for s, e in absent]   # reached the judge prompt)
             judge_used = judge
             try:
-                reply = _call_judge(judge, jpayload, effort, efforts.get(judge), artifacts_dir=art_dir)
+                reply = _call_judge(judge, jpayload, effort, efforts.get(judge),
+                                    artifacts_dir=art_dir, room_id=room_id)
             except Exception:  # noqa: BLE001 — judge down → fall back to a seat that answered
                 fallbacks = [s for s, _ in prior if s != judge]
                 if not fallbacks:
                     raise
                 judge_used = fallbacks[0]
-                reply = _call_judge(judge_used, jpayload, effort, efforts.get(judge_used), artifacts_dir=art_dir)
+                reply = _call_judge(judge_used, jpayload, effort, efforts.get(judge_used),
+                                    artifacts_dir=art_dir, room_id=room_id)
                 meta["judge_fallback_from"] = judge
             meta["model"] = providers.provider(judge_used).model
             meta["reasoning_effort"] = _effort_label(judge_used, efforts.get(judge_used))
@@ -418,7 +435,7 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
                 results = list(ex.map(
                     lambda s: _panelist(s, _round_payload(rnd, s, prompt, doc_block, path, room, human_label, eff_ctx),
                                         effort, efforts.get(s), tools=rnd.tools, max_tokens=rnd.max_tokens,
-                                        cache=cache_this, artifacts_dir=art_dir),
+                                        cache=cache_this, artifacts_dir=art_dir, room_id=room_id),
                     speakers))
         else:   # non-degrading single seat (converse): a failure propagates, as before
             s0 = speakers[0]
@@ -428,7 +445,7 @@ def run_mode(room_id: str, mode: Mode, prompt: str, selection: dict,
             reply0 = providers.call_model(
                 s0, _round_payload(rnd, s0, prompt, doc_block, path, room, human_label, eff_ctx),
                 tools=rnd.tools, effort=effort, max_tokens=rnd.max_tokens, reasoning_effort=efforts.get(s0),
-                cache=cache_this, artifacts_dir=art_dir,
+                cache=cache_this, artifacts_dir=art_dir, room_id=room_id,
                 on_delta=(on_delta if mode.name == "converse" else None))
             results = [(s0, reply0, None)]
 
@@ -463,7 +480,7 @@ def research(room_id: str, prompt: str, panel: list[str] | None = None,
     panelist → absent, never silent agreement; abort only if zero return). `panel_context`
     (blind/transcript, default blind) is the per-mode panel-sees-conversation toggle."""
     room = rooms.load_room(room_id)
-    panel = panel if panel is not None else room["participants"]
+    panel = _non_agent(panel if panel is not None else room["participants"])
     judge = judge or room["judge"]
     if not panel:
         raise ValueError("no panelists selected for this room")
@@ -482,9 +499,13 @@ def converse(room_id: str, prompt: str, addressed_to: str | None = None,
     room = rooms.load_room(room_id)
     path = rooms.main_path(room_id)
     if not addressed_to:
+        # prefer last AI, then non-agent participants, then any enabled non-agent key
+        roster = _non_agent(room.get("participants") or [])
+        code = list(room.get("code_seats") or [])
         addressed_to = (transcript.last_ai_speaker(path)
-                        or (room["participants"] or providers.enabled()
-                            or providers.provider_keys())[0])
+                        or (roster + code)
+                        or _non_agent(providers.enabled() or providers.provider_keys())
+                        or [None])[0]
     providers.provider(addressed_to)   # validate; raises ValueError if unknown
     return run_mode(room_id, CONVERSE_MODE, prompt, {"target": addressed_to},
                     human_label=human_label, on_delta=on_delta)
@@ -513,7 +534,7 @@ def mapping(room_id: str, prompt: str, panel: list[str] | None = None,
     """Fusion's blind panel, but the judge EXPOSES the landscape (consensus / divergences /
     unique signal / takeaway) instead of merging — same rails, swapped judge guidance."""
     room = rooms.load_room(room_id)
-    panel = panel if panel is not None else room["participants"]
+    panel = _non_agent(panel if panel is not None else room["participants"])
     judge = judge or room["judge"]
     if not panel:
         raise ValueError("no panelists selected for this room")

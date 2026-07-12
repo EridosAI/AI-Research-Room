@@ -32,6 +32,8 @@ let STATE = {
   marginTurns: [],           // active room's margin.jsonl
   marginOpen: false,
   viewerOpen: false,         // artifact viewer pane (Phase 33); mutually exclusive with the margin
+  codeOpen: false,           // code seat pane + outbox (Phase 39)
+  outbox: [],                // pending diplomatic crossings for the active room
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
@@ -226,7 +228,8 @@ function renderConverse(t) {
                                             // render() tears #stream down on every streaming frame
   const isHuman = t.role === "human";
   const fromMargin = t.meta && t.meta.from_margin;
-  const extra = (fromMargin ? "from margin" : "") || (t.meta && t.meta.model) || "";
+  const fromCode = t.meta && t.meta.from_code;
+  const extra = (fromMargin ? "from margin" : fromCode ? "from code" : "") || (t.meta && t.meta.model) || "";
   // label uses the display name for human turns; dot colour stays keyed on "human"
   div.appendChild(whoLine(isHuman ? displayName() : t.speaker, colorOf(isHuman ? "human" : t.speaker), extra));
   const body = document.createElement("div"); body.className = "body";
@@ -603,6 +606,7 @@ function render() {
   $("#title").textContent = STATE.room ? STATE.room.title : "";
   $("#room-settings-btn").disabled = !STATE.room;
   $("#margin-toggle").disabled = !STATE.room;
+  const codeBtn = $("#code-toggle"); if (codeBtn) codeBtn.disabled = !STATE.room;
   $("#rollback-btn").disabled = !STATE.room || !STATE.turns.length;
   renderModelBar();
   const main = $("#stream");
@@ -1258,7 +1262,7 @@ const BRACKET_CAP = 3;   // px the bracket overshoots its end rows, so last_1 st
 function drawTrajMargin(svg, geom) {
   const { laneX, rowY, rowOf, marginX, height } = geom;
   const margins = STATE.marginTurns || [];
-  const promoted = STATE.turns.filter((t) => t.meta && t.meta.from_margin);
+  const promoted = STATE.turns.filter((t) => t.meta && (t.meta.from_margin || t.meta.from_code));
   if (!margins.length && !promoted.length) return;
 
   svg.appendChild(svgEl("line", {
@@ -1333,9 +1337,13 @@ function drawTrajMargin(svg, geom) {
   for (const t of promoted) {
     const r = rowOf.get(t.id);
     if (r === undefined) continue;
-    const label = `promoted from margin: ${(t.text || "").slice(0, 80)}`;
+    const fromCode = t.meta && t.meta.from_code;
+    const label = fromCode
+      ? `from code seat: ${(t.text || "").slice(0, 80)}`
+      : `promoted from margin: ${(t.text || "").slice(0, 80)}`;
     const x0 = laneX(laneOf(t));
-    svg.appendChild(svgTitle(connector(rowY(r), "traj-promoted", x0, t.id), label));
+    const cls = fromCode ? "traj-promoted traj-from-code" : "traj-promoted";
+    svg.appendChild(svgTitle(connector(rowY(r), cls, x0, t.id), label));
     marginHit(x0, rowY(r) - 4.5, marginX - x0, 9, t.id, t.id, label);
   }
 }
@@ -1810,8 +1818,12 @@ function adoptRoom(view) {
     reasoning_effort: view.reasoning_effort || {},
     artifacts_dir: view.artifacts_dir || "",   // per-room override; "" = inherit global (Phase 32.1)
     viewer_width: view.viewer_width || null,    // per-room viewer pane width (Phase 33.2)
+    code_seats: view.code_seats || [],
+    workspace_path: view.workspace_path || "",
+    channel_mode: view.channel_mode || "auto",
   };
   STATE.turns = view.turns || [];
+  STATE.outbox = view.outbox || [];
   STATE.pending = null;                 // authoritative turns supersede any optimistic bubble (Phase 31.3)
   // A live converse stream belongs to ONE room; switching away detaches its bubble so it never
   // paints into another room (the stream keeps draining server-side as a background round). (36.4)
@@ -1821,6 +1833,7 @@ function adoptRoom(view) {
   renderComposerPickers();
   render();
   renderMargin();                       // show THIS room's own margin
+  renderCodePane();
   if (STATE.marginOpen) applyMarginWidth();
   if (STATE.viewerOpen) applyViewerWidth();
   watchActiveRoom(!!view.running);      // round-in-progress signal (Phase 30)
@@ -2411,6 +2424,135 @@ async function promoteMargin(turnId) {
   } catch (e) { banner(e.message); }
 }
 
+// ===== code seat pane + diplomatic outbox (Phase 39) =========================
+function codeStatus(msg, busy) {
+  const s = $("#code-status"); if (!s) return;
+  s.innerHTML = ""; s.classList.toggle("busy", !!busy);
+  if (busy) s.appendChild(el("span", "spinner"));
+  if (msg) s.appendChild(document.createTextNode(msg));
+}
+
+function renderCodePane() {
+  const seatSel = $("#code-seat");
+  const modeSel = $("#channel-mode");
+  const meta = $("#code-meta");
+  const list = $("#outbox-list");
+  if (!seatSel || !list) return;
+  const agents = (STATE.participants || []).filter((p) => p.backend === "agent");
+  const cur = (STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || "";
+  seatSel.innerHTML = `<option value="">seat…</option>` + agents.map(
+    (p) => `<option value="${p.name}"${p.name === cur ? " selected" : ""}>${p.name}</option>`).join("");
+  if (modeSel && STATE.room) modeSel.value = STATE.room.channel_mode || "auto";
+  if (meta) {
+    const ws = (STATE.room && STATE.room.workspace_path) || "(default on attach)";
+    meta.textContent = `workspace: ${ws}`;
+  }
+  list.innerHTML = "";
+  const pending = (STATE.outbox || []).filter((i) => i.status === "pending");
+  if (!pending.length) {
+    list.innerHTML = '<div class="empty">No pending channel crossings.</div>';
+    return;
+  }
+  for (const item of pending) {
+    const div = el("div", "outbox-item");
+    const kind = item.kind || "?";
+    const payload = item.payload || {};
+    const summary = kind === "ask_design_question" ? (payload.question || "")
+      : kind === "comment_to_main" ? (payload.text || "")
+      : kind === "request_compaction" ? (payload.note || "compaction")
+      : JSON.stringify(payload).slice(0, 120);
+    const kindEl = el("div", "outbox-kind"); kindEl.textContent = kind; div.appendChild(kindEl);
+    const body = el("div", "outbox-body"); body.textContent = summary; div.appendChild(body);
+    const actions = el("div", "outbox-actions");
+    if (kind === "ask_design_question") {
+      const inp = document.createElement("input");
+      inp.type = "text"; inp.placeholder = "answer…"; inp.className = "outbox-answer";
+      const ok = el("button"); ok.textContent = "answer";
+      ok.addEventListener("click", () => approveOutbox(item.id, inp.value));
+      actions.append(inp, ok);
+    } else {
+      const ok = el("button"); ok.textContent = "approve";
+      ok.addEventListener("click", () => approveOutbox(item.id));
+      actions.appendChild(ok);
+    }
+    const no = el("button"); no.textContent = "reject";
+    no.addEventListener("click", () => rejectOutbox(item.id));
+    actions.appendChild(no);
+    div.appendChild(actions);
+    list.appendChild(div);
+  }
+}
+
+async function approveOutbox(itemId, answer) {
+  if (!STATE.room) return;
+  try {
+    const body = answer != null ? { answer } : {};
+    const data = await api(`/rooms/${STATE.room.id}/outbox/${itemId}/approve`, "POST", body);
+    STATE.outbox = data.outbox || [];
+    if (data.transcript) adoptRoom(data.transcript);
+    else renderCodePane();
+  } catch (e) { codeStatus(e.message); }
+}
+
+async function rejectOutbox(itemId) {
+  if (!STATE.room) return;
+  try {
+    const data = await api(`/rooms/${STATE.room.id}/outbox/${itemId}/reject`, "POST");
+    STATE.outbox = data.outbox || [];
+    renderCodePane();
+  } catch (e) { codeStatus(e.message); }
+}
+
+function openCodePane() {
+  if (!STATE.room) return;
+  STATE.codeOpen = true;
+  $("#code-pane").classList.remove("hidden");
+  $("#code-splitter").classList.remove("hidden");
+  renderCodePane();
+  api(`/rooms/${STATE.room.id}/code/attach`, "POST").then((d) => {
+    if (STATE.room && d.room) {
+      STATE.room.workspace_path = d.room.workspace_path || STATE.room.workspace_path;
+      renderCodePane();
+    }
+  }).catch((e) => codeStatus(`attach: ${e.message}`));
+}
+
+function closeCodePane() {
+  STATE.codeOpen = false;
+  $("#code-pane").classList.add("hidden");
+  $("#code-splitter").classList.add("hidden");
+  focusComposer();
+}
+
+async function codeSend() {
+  if (!STATE.room) return;
+  const input = $("#code-input");
+  const text = (input && input.value || "").trim();
+  if (!text) return;
+  const seat = ($("#code-seat") && $("#code-seat").value)
+    || (STATE.room.code_seats && STATE.room.code_seats[0]);
+  if (!seat) { codeStatus("pick a code seat first."); return; }
+  const roomId = STATE.room.id;
+  codeStatus(`${seat} working…`, true);
+  try {
+    // window-mode converse addressed to the agent seat (streams via existing path)
+    const sel = { mode: "converse", prompt: text, target: seat };
+    input.value = "";
+    STATE.pending = { text, ts: Date.now() }; render();
+    const data = await streamConverse(roomId, sel);
+    if (STATE.room && STATE.room.id === data.room_id) {
+      adoptRoom(data.transcript);
+      await markRead(roomId, data.transcript.turn_count);
+    }
+    await refreshRooms();
+    codeStatus("");
+  } catch (e) {
+    STATE.pending = null; render();
+    if (e && e.name === "AbortError") codeStatus("stopped.");
+    else codeStatus(`code failed: ${e.message}`);
+  }
+}
+
 // ===== wiring ================================================================
 $("#send-btn").addEventListener("click", send);
 // attach files: pick (button → hidden input) or drop onto the composer (Phase 22)
@@ -2436,6 +2578,32 @@ $("#traj-toggle").addEventListener("click", () => setUI({ trajectory_open: !STAT
 $("#margin-toggle").addEventListener("click", () => (STATE.marginOpen ? closeMargin() : openMargin()));
 $("#margin-close").addEventListener("click", closeMargin);
 $("#margin-send").addEventListener("click", marginSend);
+// Phase 39 — code seat pane + outbox
+const _codeToggle = $("#code-toggle");
+if (_codeToggle) _codeToggle.addEventListener("click", () => (STATE.codeOpen ? closeCodePane() : openCodePane()));
+const _codeClose = $("#code-close");
+if (_codeClose) _codeClose.addEventListener("click", closeCodePane);
+const _codeSend = $("#code-send");
+if (_codeSend) _codeSend.addEventListener("click", codeSend);
+const _codeInput = $("#code-input");
+if (_codeInput) _codeInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); codeSend(); }
+});
+const _channelMode = $("#channel-mode");
+if (_channelMode) _channelMode.addEventListener("change", async (e) => {
+  if (!STATE.room) return;
+  const v = e.target.value;
+  STATE.room.channel_mode = v;
+  try { await api(`/rooms/${STATE.room.id}`, "PUT", { channel_mode: v }); } catch (_e) { /* */ }
+});
+const _codeSeat = $("#code-seat");
+if (_codeSeat) _codeSeat.addEventListener("change", async (e) => {
+  if (!STATE.room) return;
+  const v = e.target.value;
+  const seats = v ? [v] : [];
+  STATE.room.code_seats = seats;
+  try { await api(`/rooms/${STATE.room.id}`, "PUT", { code_seats: seats }); } catch (_e) { /* */ }
+});
 $("#margin-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); marginSend(); }
 });

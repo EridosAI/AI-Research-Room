@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import secrets, settings
 from .adapters import anthropic_style, openai_style
+# opencode imported lazily inside call_model (agent backend) to avoid import cost
 
 DEFAULT_JUDGE = "claude"
 
@@ -514,10 +515,31 @@ def _guard_artifacts(payload: dict, artifacts_dir: str | None) -> dict:
     return {**payload, "system": sys}
 
 
+# Phase 39 — code-channel awareness. Folded into EVERY seat (incl. non-agent) so the
+# panel/judge know what from_code notes mean. System-slot only; never transcript content.
+CODE_CHANNEL_GUARD = (
+    "A code seat may be attached to this room. Notes with meta.from_code are comments "
+    "from that seat on the work in progress — treat them as deliberate crossings into "
+    "the main transcript (they passed outbox/approval). The code seat has MCP tools for "
+    "diplomatic crossing (comment_to_main, query_main_state, ask_design_question, "
+    "workspace_status, request_compaction); other seats do not call those tools."
+)
+
+
+def _guard_code_channel(payload: dict, enabled: bool = True) -> dict:
+    """Fold code-channel awareness into the system prompt. Returns a COPY."""
+    if not enabled:
+        return payload
+    sys = (payload.get("system") or "").strip()
+    sys = f"{sys}\n\n{CODE_CHANNEL_GUARD}".strip() if sys else CODE_CHANNEL_GUARD
+    return {**payload, "system": sys}
+
+
 def call_model(provider_key: str, payload: dict, tools: bool = False,
                effort: str = "medium", max_tokens: int | None = None,
                reasoning_effort: str | None = None, cache: bool = False,
-               artifacts_dir: str | None = None, on_delta=None) -> ModelReply:
+               artifacts_dir: str | None = None, on_delta=None,
+               room_id: str | None = None, abort=None) -> ModelReply:
     """payload = {"system": str, "messages": [{role, content}]} → ModelReply.
 
     Reasoning capture is best-effort and gated by the provider's `reasoning`
@@ -530,6 +552,9 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     server tool); the provider runs the search→answer loop and returns in one call.
     The cli (Grok) path searches via its own agentic runner regardless of the flag.
     With the flag off the api request is byte-identical to a plain chat call.
+
+    backend=="agent" (Phase 39): routes to the OpenCode adapter for one window-mode
+    turn. `room_id` is required for agent seats (session/workspace lifecycle).
     """
     p = provider(provider_key)
     do_search = bool(tools and p.web_search)
@@ -538,6 +563,15 @@ def call_model(provider_key: str, payload: dict, tools: bool = False,
     searches = do_search or (p.auth_mode == "cli" and tools)
     payload = _guard_no_search(payload, searches)
     payload = _guard_artifacts(payload, artifacts_dir)   # room artifacts dir → awareness line (Phase 32.2)
+    payload = _guard_code_channel(payload)               # Phase 39: code-channel awareness
+    if p.backend == "agent":
+        from .adapters import opencode
+        if not room_id:
+            raise ValueError("agent backend requires room_id")
+        text, usage = opencode.chat(
+            p, payload, room_id=room_id, on_delta=on_delta, abort=abort)
+        return ModelReply(text, usage=usage or _estimate_usage(payload, text),
+                          served_model=p.model, finish_reason="stop")
     if p.backend == "mock":
         text = _mock_text(p, payload)
         if on_delta is not None:

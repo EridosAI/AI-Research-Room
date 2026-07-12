@@ -28,8 +28,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import artifacts, export_md, margin, modes, providers, rooms, secrets, settings
+from engine import artifacts, channel, export_md, margin, modes, providers, rooms, secrets, settings
 from engine import transcript as T
+from engine.adapters import opencode
 
 app = FastAPI(title="research room")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -155,6 +156,9 @@ class RoomUpdate(BaseModel):
     reasoning_effort: dict | None = None   # {panelist_key: "high"|"medium"|"low"} per-room overrides
     artifacts_dir: str | None = None       # per-room artifacts dir override; "" = inherit global (Phase 32.1)
     viewer_width: float | None = None      # per-room artifact-viewer pane width, px (Phase 33.2)
+    code_seats: list[str] | None = None    # Phase 39: agent seats (outside participants)
+    workspace_path: str | None = None
+    channel_mode: str | None = None        # auto | control
 
 
 class UIBody(BaseModel):
@@ -327,6 +331,10 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "reasoning_effort": meta.get("reasoning_effort", {}),
         "artifacts_dir": meta.get("artifacts_dir", ""),   # per-room override ("" = inherit global; Phase 32.1)
         "viewer_width": meta.get("viewer_width"),         # artifact-viewer pane width (Phase 33.2)
+        "code_seats": meta.get("code_seats") or [],
+        "workspace_path": meta.get("workspace_path") or "",
+        "channel_mode": meta.get("channel_mode") or "auto",
+        "outbox": meta.get("outbox") or [],
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,
@@ -458,6 +466,12 @@ def put_room(room_id: str, body: RoomUpdate) -> dict:
             raise HTTPException(400, f"unknown providers: {', '.join(unknown)}")
     if "judge" in fields and fields["judge"] not in providers.registry():
         raise HTTPException(400, f"unknown judge: {fields['judge']}")
+    if "code_seats" in fields:
+        unknown = [p for p in fields["code_seats"] if p not in providers.registry()]
+        if unknown:
+            raise HTTPException(400, f"unknown code seats: {', '.join(unknown)}")
+    if "channel_mode" in fields and fields["channel_mode"] not in ("auto", "control"):
+        raise HTTPException(400, "channel_mode must be auto|control")
     # room.json write → meta lock (never blocks behind an in-flight round).
     with _meta_lock(room_id):
         meta = rooms.update_room(room_id, **fields)
@@ -570,12 +584,9 @@ class _StreamAborted(Exception):
 
 @app.post("/rooms/{room_id}/run/stream")
 async def room_run_stream(room_id: str, body: RunBody, request: Request):
-    """Streaming converse. SSE events: `delta` {text} per chunk → terminal `done` (SAME payload
-    shape as /run) or `error` {message}. Converse ONLY — other modes 400 (the client streams
-    converse and keeps /run for everything else). The engine stays sync: the blocking round runs
-    on a worker thread and deltas cross a thread-safe bridge into this async generator. A client
-    disconnect flips `abort`, so the next delta raises _StreamAborted and the round drops its
-    partial (no ai turn). Same validation + _round_begin/_round_end bookkeeping as room_run."""
+    """Streaming converse (and agent seats). SSE events: `delta` {text} per chunk → terminal
+    `done` (SAME payload shape as /run) or `error` {message}. Converse ONLY for non-agent —
+    other modes 400. On disconnect: abort worker + OpenCode interrupt + cancel channel outbox."""
     _require_room(room_id)
     if body.mode != "converse":
         raise HTTPException(400, "streaming is converse-only; use /run for other modes")
@@ -588,6 +599,12 @@ async def room_run_stream(room_id: str, body: RunBody, request: Request):
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
     abort = threading.Event()
+    agent_target = False
+    if body.target:
+        try:
+            agent_target = providers.provider(body.target).backend == "agent"
+        except ValueError:
+            agent_target = False
 
     def emit(item):                                   # worker thread → event loop (thread-safe)
         loop.call_soon_threadsafe(q.put_nowait, item)
@@ -595,6 +612,8 @@ async def room_run_stream(room_id: str, body: RunBody, request: Request):
     def on_delta(chunk):
         if abort.is_set():
             raise _StreamAborted()
+        # empty chunks are heartbeats from the OpenCode bridge (R2) — still emit so proxies
+        # see activity, but the client ignores empty text.
         emit(("delta", {"text": chunk}))
 
     _round_begin(room_id)   # the "running" signal, before the worker (matches room_run: shows queued)
@@ -637,6 +656,11 @@ async def room_run_stream(room_id: str, body: RunBody, request: Request):
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
         finally:
             abort.set()                               # disconnect OR normal end → stop the worker if live
+            if agent_target:
+                try:
+                    opencode.interrupt(room_id)       # POST /interrupt + cancel outbox waiters
+                except Exception:                     # noqa: BLE001
+                    pass
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -716,6 +740,58 @@ def promote_margin(room_id: str, turn_id: str) -> dict:
         view = _full_room(room_id)
     _maybe_export(room_id)
     return {"promoted": note, "room_id": room_id, "transcript": view}
+
+
+# ---- diplomatic channel outbox (Phase 39) -----------------------------------
+class OutboxReplyBody(BaseModel):
+    answer: str | None = None
+
+
+@app.get("/rooms/{room_id}/outbox")
+def get_outbox(room_id: str) -> dict:
+    _require_room(room_id)
+    return {"outbox": channel.list_outbox(room_id),
+            "channel_mode": channel.channel_mode(room_id)}
+
+
+@app.post("/rooms/{room_id}/outbox/{item_id}/approve")
+def approve_outbox(room_id: str, item_id: str, body: OutboxReplyBody | None = None) -> dict:
+    _require_room(room_id)
+    answer = body.answer if body else None
+    try:
+        item = channel.approve(
+            room_id, item_id, answer=answer,
+            room_lock=lambda: _room_lock(room_id))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"item": item, "outbox": channel.list_outbox(room_id),
+            "transcript": _full_room(room_id)}
+
+
+@app.post("/rooms/{room_id}/outbox/{item_id}/reject")
+def reject_outbox(room_id: str, item_id: str) -> dict:
+    _require_room(room_id)
+    try:
+        item = channel.reject(room_id, item_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"item": item, "outbox": channel.list_outbox(room_id)}
+
+
+@app.post("/rooms/{room_id}/code/attach")
+def attach_code_seat(room_id: str) -> dict:
+    """Lazily ensure workspace + opencode serve + session for the room's code seat."""
+    _require_room(room_id)
+    try:
+        h = opencode.attach_or_create_session(room_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+    return {
+        "workspace": str(h.workspace),
+        "port": h.port,
+        "session_id": h.session_id,
+        "room": _room_view(rooms.load_room(room_id)),
+    }
 
 
 # ---- markdown artifacts (Phase 14D) -----------------------------------------
