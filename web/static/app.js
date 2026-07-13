@@ -2606,7 +2606,8 @@ function openCodePane() {
   applyCodeWidth();
   renderCodePane();
   codeStatus("attaching OpenCode session…", true);
-  api(`/rooms/${STATE.room.id}/code/attach`, "POST").then((d) => {
+  // force_new so we never keep a stale session that lacks fusion MCP tools
+  api(`/rooms/${STATE.room.id}/code/attach`, "POST", { force_new: true }).then((d) => {
     if (STATE.room && d.room) {
       STATE.room.workspace_path = d.workspace || d.room.workspace_path || STATE.room.workspace_path;
       if (d.room.code_seats) STATE.room.code_seats = d.room.code_seats;
@@ -2614,7 +2615,8 @@ function openCodePane() {
       renderCodePane();
     }
     const sid = d.session_id ? d.session_id.slice(0, 12) : "?";
-    codeStatus(`ready · session ${sid} · :${d.port || "?"}`);
+    const mcp = d.mcp_connected ? "mcp:ok" : "mcp:MISSING";
+    codeStatus(`ready · ${mcp} · session ${sid} · :${d.port || "?"}`);
   }).catch((e) => {
     // Surface the real failure (service not restarted / opencode missing / workspace) —
     // send will re-attach via the stream endpoint, so this is advisory.

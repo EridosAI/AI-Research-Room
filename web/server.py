@@ -781,18 +781,29 @@ def reject_outbox(room_id: str, item_id: str) -> dict:
     return {"item": item, "outbox": channel.list_outbox(room_id)}
 
 
+class CodeAttachBody(BaseModel):
+    force_new: bool = False   # kill serve + new session (use when MCP tools missing)
+
+
 @app.post("/rooms/{room_id}/code/attach")
-def attach_code_seat(room_id: str) -> dict:
-    """Lazily ensure workspace + opencode serve + session for the room's code seat."""
+def attach_code_seat(room_id: str, body: CodeAttachBody | None = None) -> dict:
+    """Lazily ensure workspace + opencode serve + session for the room's code seat.
+
+    Always rewrites native fusion MCP config. force_new=true discards the old
+    session (fixes "tools not available" after MCP/config upgrades).
+    """
     _require_room(room_id)
+    force = bool(body and body.force_new)
     try:
-        h = opencode.attach_or_create_session(room_id)
+        h = opencode.attach_or_create_session(room_id, force_new=force)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+    mcp_ok = opencode._mcp_connected(h.port)
     return {
         "workspace": str(h.workspace),
         "port": h.port,
         "session_id": h.session_id,
+        "mcp_connected": mcp_ok,
         "room": _room_view(rooms.load_room(room_id)),
         "code_turns": code_seat.load_turns(room_id),
     }

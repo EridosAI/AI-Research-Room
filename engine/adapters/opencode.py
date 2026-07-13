@@ -294,17 +294,34 @@ def start_serve(room_id: str, workspace: Path | None = None) -> ServeHandle:
     return h
 
 
-def attach_or_create_session(room_id: str, *, model: dict | None = None) -> ServeHandle:
-    """Ensure serve + session. Re-uses healthy port/session from room.json when possible.
+def _mcp_connected(port: int) -> bool:
+    try:
+        st = _req("GET", f"{_base(port)}/mcp", timeout=5) or {}
+        return (st.get("fusion") or {}).get("status") == "connected"
+    except Exception:  # noqa: BLE001
+        return False
 
-    If a re-attached serve was started without credentials (pre-39.3b), kill and
-    respawn so OPENROUTER_API_KEY is present — otherwise every message 500s.
+
+def attach_or_create_session(room_id: str, *, model: dict | None = None,
+                             force_new: bool = False) -> ServeHandle:
+    """Ensure serve + session with fusion MCP connected.
+
+    Always rewrites workspace opencode.json (native MCP launcher). Prefers a
+    handle this process started. Orphaned/stale ports are discarded and a fresh
+    serve is spawned with keys + current MCP config.
     """
     from .. import rooms
     room = rooms.load_room(room_id)
     ws = ensure_workspace(room_id, room.get("workspace_path") or None)
 
-    # Prefer a handle we started in this process (known to carry OPENROUTER_API_KEY).
+    if force_new:
+        shutdown(room_id)
+        try:
+            rooms.update_room(room_id, opencode_port=None, opencode_session_id=None)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Prefer a handle we started in this process (known good env + MCP config).
     with _handles_guard:
         owned = _handles.get(room_id)
     if owned and owned.proc and owned.proc.poll() is None and _healthy(owned.port):
@@ -313,10 +330,15 @@ def attach_or_create_session(room_id: str, *, model: dict | None = None) -> Serv
             owned.session_id = sess.get("id")
             rooms.update_room(room_id, opencode_session_id=owned.session_id,
                               opencode_port=owned.port)
+        # If MCP dropped, try reconnect once
+        if not _mcp_connected(owned.port):
+            try:
+                _req("POST", f"{_base(owned.port)}/mcp/fusion/connect", {})
+            except Exception:  # noqa: BLE001
+                pass
         return owned
 
-    # Stale port/session in room.json often points at an orphaned serve started WITHOUT
-    # credentials (pre-39.3b). Never re-attach to those — clear and spawn with keys.
+    # Never re-attach to a foreign/orphaned serve — it may lack keys or have stale MCP.
     if room.get("opencode_port") or room.get("opencode_session_id"):
         try:
             rooms.update_room(room_id, opencode_port=None, opencode_session_id=None)
@@ -324,6 +346,15 @@ def attach_or_create_session(room_id: str, *, model: dict | None = None) -> Serv
             pass
 
     h = start_serve(room_id, ws)
+    # wait briefly for fusion MCP to connect (OpenCode loads MCP async at serve start)
+    for _ in range(20):
+        if _mcp_connected(h.port):
+            break
+        try:
+            _req("POST", f"{_base(h.port)}/mcp/fusion/connect", {})
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.25)
     sess = _req("POST", f"{_base(h.port)}/session", {})
     h.session_id = sess.get("id")
     rooms.update_room(room_id, opencode_session_id=h.session_id, opencode_port=h.port)
