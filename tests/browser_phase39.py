@@ -34,7 +34,12 @@ enabled   = true
 color     = "#67e8f9"
 """)
 
-PORT = 8799
+# Pick a free port so a leftover manual fusion on 8765/8799 can't steal the bind.
+import socket
+_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+_sock.bind(("127.0.0.1", 0))
+PORT = _sock.getsockname()[1]
+_sock.close()
 env = os.environ.copy()
 env["RESEARCH_ROOM_VAULT"] = str(Path(_TMP) / "vault")
 env["RESEARCH_ROOM_CONFIG"] = str(_CFG)
@@ -70,18 +75,30 @@ def main() -> int:
     py = str(REPO / ".venv" / "bin" / "python")
     if not Path(py).is_file():
         py = sys.executable
+    env["PYTHONUNBUFFERED"] = "1"
+    log_path = Path(_TMP) / "server.log"
+    logf = open(log_path, "w", buffering=1)  # noqa: SIM115
     proc = subprocess.Popen(
-        [py, "-m", "web.server"], cwd=str(REPO), env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        [py, "-u", "-m", "web.server"], cwd=str(REPO), env=env,
+        stdout=logf, stderr=subprocess.STDOUT)
     try:
-        for _ in range(60):
+        deadline = time.time() + 90
+        last_err = ""
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                logf.flush()
+                print("server exited early:", log_path.read_text()[-800:])
+                return 1
             try:
-                urllib.request.urlopen(BASE + "/rooms", timeout=1)
+                # /mnt/c cold start is slow; connection-refused is normal for a few seconds
+                urllib.request.urlopen(BASE + "/rooms", timeout=10)
                 break
-            except Exception:
-                time.sleep(0.2)
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                time.sleep(0.4)
         else:
-            print("server failed to start")
+            logf.flush()
+            print(f"server failed to start ({last_err}):", log_path.read_text()[-800:])
             return 1
 
         room = _json("/rooms", "POST", {"title": "phase39 browser"})
@@ -144,15 +161,41 @@ def main() -> int:
             body = page.locator("#outbox-list").inner_text()
             check("outbox shows pending crossing", "pending note" in body or "comment_to_main" in body)
             check("channel-mode select present", page.locator("#channel-mode").count() == 1)
-            # 39.2 harness chrome
+            # 39.2/39.3 harness chrome
             check("Build mode button present", page.locator("#code-mode-build").count() == 1)
+            check("Plan mode button present", page.locator("#code-mode-plan").count() == 1)
             check("Ask mode button present", page.locator("#code-mode-ask").count() == 1)
+            check("reasoning selector present", page.locator("#code-reasoning").count() == 1)
             check("send-to-code label", "code" in (page.locator("#code-send").inner_text() or "").lower())
             check("code stream present", page.locator("#code-stream").count() == 1)
             check("code splitter present", page.locator("#code-splitter").count() == 1)
             # ultrawide-ish width: code pane default min width
             cw = page.locator("#code-pane").evaluate("e => e.getBoundingClientRect().width")
             check("code pane is wide (>= 360)", cw >= 360)
+            # attach route must exist (not 404) — may fail later on serve spawn in CI without
+            # OPENROUTER, but path registration is the facade bug we hit in 39.3
+            page.wait_for_timeout(600)
+            status = page.locator("#code-status").inner_text()
+            check("attach not 404", "Not Found" not in status)
+            # isolated stream endpoint responds (mock path) without writing main
+            main_before = len(_json(f"/rooms/{rid}").get("turns") or [])
+            # exercise stream with mockagent via direct API (engine mock not available in
+            # live server — just verify route is registered and validates body)
+            try:
+                req = urllib.request.Request(
+                    BASE + f"/rooms/{rid}/code/run/stream",
+                    data=json.dumps({"prompt": "ping", "seat": "mock", "mode": "ask"}).encode(),
+                    method="POST", headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    body = r.read().decode("utf-8", "replace")
+                check("code stream route registered", "event:" in body or "data:" in body)
+            except urllib.error.HTTPError as e:
+                # 502 from missing OpenCode is fine; 404 is the facade bug
+                check("code stream not 404", e.code != 404)
+            except Exception as e:
+                check(f"code stream reachable ({type(e).__name__})", "404" not in str(e))
+            main_after = len(_json(f"/rooms/{rid}").get("turns") or [])
+            check("main turns unchanged after code stream probe", main_before == main_after)
             page.click("#code-close")
             page.wait_for_timeout(200)
             check("code pane closes", page.locator("#code-pane").evaluate(

@@ -801,12 +801,13 @@ def attach_code_seat(room_id: str) -> dict:
 class CodeBody(BaseModel):
     prompt: str
     seat: str | None = None
-    mode: str = "build"   # build | ask
+    mode: str = "build"          # build | plan | ask
+    reasoning: str = ""          # "" | low | medium | high | max
 
 
 @app.post("/rooms/{room_id}/code/run/stream")
 async def code_run_stream(room_id: str, body: CodeBody, request: Request):
-    """Isolated code-seat stream (Phase 39.2). Writes code.jsonl only — never main.
+    """Isolated code-seat stream (Phase 39.2/39.3). Writes code.jsonl only — never main.
 
     SSE: delta {text} → done {result, code_turns, outbox} | error {message}.
     Disconnect → abort + OpenCode interrupt + cancel channel waiters.
@@ -816,8 +817,10 @@ async def code_run_stream(room_id: str, body: CodeBody, request: Request):
         raise HTTPException(400, "prompt required")
     if body.seat and body.seat not in providers.registry():
         raise HTTPException(400, f"unknown provider: {body.seat}")
-    if body.mode not in ("build", "ask"):
-        raise HTTPException(400, "mode must be build|ask")
+    if body.mode not in ("build", "plan", "ask"):
+        raise HTTPException(400, "mode must be build|plan|ask")
+    if body.reasoning and body.reasoning not in ("low", "medium", "high", "max"):
+        raise HTTPException(400, "reasoning must be low|medium|high|max (or empty)")
 
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
@@ -836,6 +839,7 @@ async def code_run_stream(room_id: str, body: CodeBody, request: Request):
             # code seat does NOT take the main room lock — isolation from main rounds
             result = code_seat.code_turn(
                 room_id, body.prompt, seat=body.seat, mode=body.mode,
+                reasoning=body.reasoning or "",
                 on_delta=on_delta, abort=abort)
             emit(("done", {
                 "result": result,
@@ -855,12 +859,14 @@ async def code_run_stream(room_id: str, body: CodeBody, request: Request):
     threading.Thread(target=worker, daemon=True).start()
 
     async def gen():
+        cancelled = False
         try:
             while True:
                 try:
                     item = await asyncio.wait_for(q.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     if await request.is_disconnected():
+                        cancelled = True
                         break
                     continue
                 if item is None:
@@ -869,10 +875,13 @@ async def code_run_stream(room_id: str, body: CodeBody, request: Request):
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
         finally:
             abort.set()
-            try:
-                opencode.interrupt(room_id)
-            except Exception:  # noqa: BLE001
-                pass
+            # Only interrupt OpenCode + cancel outbox waiters on client disconnect —
+            # a normal done path must not wipe pending channel crossings.
+            if cancelled:
+                try:
+                    opencode.interrupt(room_id)
+                except Exception:  # noqa: BLE001
+                    pass
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

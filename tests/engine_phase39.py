@@ -207,8 +207,10 @@ def main() -> int:
     # ---- 39.6 agent call_model via mock chat ---------------------------------
     print("39.6 agent call_model branch")
 
-    def mock_chat(p, payload, *, room_id, on_delta=None, abort=None):
+    def mock_chat(p, payload, *, room_id, on_delta=None, abort=None, agent=None, variant=None):
         text = f"[agent:{p.key}] " + (payload.get("messages") or [{}])[-1].get("content", "")[:40]
+        if agent:
+            text = f"[{agent}] " + text
         if on_delta:
             on_delta(text)
         return text, {"input": 10, "output": 5, "cost": 0.001, "exact": True}
@@ -272,21 +274,28 @@ def main() -> int:
     try:
         out = code_seat.code_turn(rid3, "implement isolation", seat="mockagent", mode="build")
         check("code_turn returns agent text", "agent:mockagent" in out and "Mode: BUILD" in out)
+        check("build mode maps to build agent", "[build]" in out)
         code_turns = code_seat.load_turns(rid3)
         check("code.jsonl has human+ai", len(code_turns) == 2
               and code_turns[0]["role"] == "human" and code_turns[1]["role"] == "ai")
         check("code mode stamped", (code_turns[0].get("meta") or {}).get("code_mode") == "build")
         main_after = transcript.load(rooms.main_path(rid3))
         check("main.jsonl unchanged by code_turn", main_before == main_after)
-        # ask mode prefix reaches the adapter payload
-        seen_payload = []
-        def cap_chat(p, payload, *, room_id, on_delta=None, abort=None):
-            seen_payload.append(payload)
-            return mock_chat(p, payload, room_id=room_id, on_delta=on_delta, abort=abort)
+        # ask/plan mode prefix + agent mapping
+        seen = []
+        def cap_chat(p, payload, *, room_id, on_delta=None, abort=None, agent=None, variant=None):
+            seen.append({"payload": payload, "agent": agent, "variant": variant})
+            return mock_chat(p, payload, room_id=room_id, on_delta=on_delta, abort=abort,
+                             agent=agent, variant=variant)
         opencode._MOCK_CHAT = cap_chat
         code_seat.code_turn(rid3, "why this?", seat="mockagent", mode="ask")
-        body = (seen_payload[-1].get("messages") or [{}])[-1].get("content") or ""
+        body = (seen[-1]["payload"].get("messages") or [{}])[-1].get("content") or ""
         check("ask mode prefixes prompt", body.startswith("Mode: ASK") and "why this?" in body)
+        check("ask mode uses plan agent", seen[-1]["agent"] == "plan")
+        code_seat.code_turn(rid3, "outline steps", seat="mockagent", mode="plan", reasoning="high")
+        check("plan mode uses plan agent", seen[-1]["agent"] == "plan")
+        check("reasoning variant forwarded", seen[-1]["variant"] == "high")
+        check("opencode bin resolvable", bool(opencode._opencode_bin()))
     finally:
         opencode._MOCK_CHAT = None
     check("code_pane_width is mutable", "code_pane_width" in rooms._MUTABLE)

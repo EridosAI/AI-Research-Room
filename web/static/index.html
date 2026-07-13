@@ -281,7 +281,17 @@
         <div class="code-harness">
           <div class="code-harness-modes" title="harness mode — stays inside the code seat">
             <button type="button" id="code-mode-build" class="code-mode active" data-mode="build">Build</button>
+            <button type="button" id="code-mode-plan" class="code-mode" data-mode="plan">Plan</button>
             <button type="button" id="code-mode-ask" class="code-mode" data-mode="ask">Ask</button>
+            <label class="code-reason-label" title="reasoning effort (OpenCode variant)">think
+              <select id="code-reasoning">
+                <option value="" selected>default</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="max">max</option>
+              </select>
+            </label>
             <span class="code-harness-hint">code seat only · main via outbox</span>
           </div>
           <div class="margin-composer code-composer">

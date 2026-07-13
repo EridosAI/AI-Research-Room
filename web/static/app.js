@@ -34,7 +34,8 @@ let STATE = {
   viewerOpen: false,         // artifact viewer pane (Phase 33); mutually exclusive with the margin
   codeOpen: false,           // code seat pane + outbox (Phase 39)
   codeTurns: [],             // isolated code.jsonl turns (Phase 39.2) — never main
-  codeMode: "build",         // harness mode: build | ask
+  codeMode: "build",         // harness mode: build | plan | ask
+  codeReasoning: "",         // OpenCode variant: "" | low | medium | high | max
   codeStreaming: null,       // live code-seat bubble {text}
   codeAbort: null,           // AbortController for code stream
   outbox: [],                // pending diplomatic crossings for the active room
@@ -198,12 +199,20 @@ function focusComposer() {
 }
 
 // ===== API ===================================================================
+function _errDetail(data, res) {
+  // FastAPI may return detail as string, list of validation errors, or object.
+  const d = data && data.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join("; ");
+  if (d && typeof d === "object") return JSON.stringify(d);
+  return `${res.status} ${res.statusText}`;
+}
 async function api(path, method, body) {
   const opts = { method: method || "GET" };
   if (body !== undefined) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(_errDetail(data, res));
   return data;
 }
 
@@ -2588,14 +2597,21 @@ function openCodePane() {
   }
   applyCodeWidth();
   renderCodePane();
+  codeStatus("attaching OpenCode session…", true);
   api(`/rooms/${STATE.room.id}/code/attach`, "POST").then((d) => {
     if (STATE.room && d.room) {
-      STATE.room.workspace_path = d.room.workspace_path || STATE.room.workspace_path;
+      STATE.room.workspace_path = d.workspace || d.room.workspace_path || STATE.room.workspace_path;
       if (d.room.code_seats) STATE.room.code_seats = d.room.code_seats;
       if (d.code_turns) STATE.codeTurns = d.code_turns;
       renderCodePane();
     }
-  }).catch((e) => codeStatus(`attach: ${e.message}`));
+    const sid = d.session_id ? d.session_id.slice(0, 12) : "?";
+    codeStatus(`ready · session ${sid} · :${d.port || "?"}`);
+  }).catch((e) => {
+    // Surface the real failure (service not restarted / opencode missing / workspace) —
+    // send will re-attach via the stream endpoint, so this is advisory.
+    codeStatus(`attach failed: ${e.message} — try send (re-attaches) or restart fusion`);
+  });
 }
 
 function closeCodePane() {
@@ -2621,7 +2637,7 @@ async function streamCodeSeat(roomId, body) {
     });
     if (!res.ok || !res.body) {
       const d = await res.json().catch(() => ({}));
-      throw new Error(d.detail || `${res.status} ${res.statusText}`);
+      throw new Error(_errDetail(d, res));
     }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -2671,16 +2687,17 @@ async function codeSend() {
   const roomId = STATE.room.id;
   const mainCountBefore = (STATE.turns || []).length;
   const mode = STATE.codeMode || "build";
-  codeStatus(`${seat} · ${mode}…`, true);
+  const reasoning = STATE.codeReasoning || ($("#code-reasoning") && $("#code-reasoning").value) || "";
+  codeStatus(`${seat} · ${mode}${reasoning ? " · " + reasoning : ""}…`, true);
   try {
     input.value = "";
     // optimistic human turn in the CODE stream only
     STATE.codeTurns = (STATE.codeTurns || []).concat([{
       role: "human", speaker: "human", text,
-      meta: { code_mode: mode, seat },
+      meta: { code_mode: mode, seat, reasoning: reasoning || "default" },
     }]);
     renderCodeStream();
-    const data = await streamCodeSeat(roomId, { prompt: text, seat, mode });
+    const data = await streamCodeSeat(roomId, { prompt: text, seat, mode, reasoning });
     if (STATE.room && STATE.room.id === roomId) {
       STATE.codeTurns = data.code_turns || STATE.codeTurns;
       STATE.outbox = data.outbox || STATE.outbox;
@@ -2690,11 +2707,10 @@ async function codeSend() {
     if ((STATE.turns || []).length !== mainCountBefore) {
       codeStatus("warning: main transcript changed during code send");
     } else {
-      codeStatus("");
+      codeStatus("done");
     }
   } catch (e) {
-    // drop optimistic tail if stream failed before commit
-    STATE.codeTurns = (STATE.codeTurns || []).filter((t) => t.id || t.role !== "human" || t.text !== text);
+    // keep optimistic human turn so the failure is visible; stream may have partial ai
     renderCodeStream();
     if (e && e.name === "AbortError") codeStatus("stopped.");
     else codeStatus(`code failed: ${e.message}`);
@@ -2742,6 +2758,10 @@ document.querySelectorAll(".code-mode").forEach((btn) => {
     STATE.codeMode = btn.dataset.mode || "build";
     renderCodeModes();
   });
+});
+const _codeReason = $("#code-reasoning");
+if (_codeReason) _codeReason.addEventListener("change", (e) => {
+  STATE.codeReasoning = e.target.value || "";
 });
 const _channelMode = $("#channel-mode");
 if (_channelMode) _channelMode.addEventListener("change", async (e) => {

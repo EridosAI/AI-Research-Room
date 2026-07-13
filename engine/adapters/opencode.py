@@ -122,9 +122,35 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
 def _channel_mcp_command(room_id: str) -> list[str]:
     """stdio MCP launcher for the diplomatic channel tools."""
     repo = Path(__file__).resolve().parents[2]
-    py = shutil.which("python3") or "python3"
+    # Prefer the venv python the service already uses (full path — service PATH is sparse).
+    venv_py = repo / ".venv" / "bin" / "python"
+    py = str(venv_py) if venv_py.is_file() else (shutil.which("python3") or "python3")
     script = str(repo / "engine" / "channel_mcp.py")
     return [py, script, room_id]
+
+
+def _opencode_bin() -> str:
+    """Resolve the opencode CLI for the service user.
+
+    systemd's PATH is minimal (/usr/bin…) and does not include nvm. Prefer a known
+    absolute path, then PATH, then common nvm locations.
+    """
+    env = os.environ.get("OPENCODE_BIN")
+    if env and Path(env).is_file():
+        return env
+    found = shutil.which("opencode")
+    if found:
+        return found
+    home = Path(os.environ.get("HOME") or Path.home())
+    for cand in (
+        home / ".nvm/versions/node/v20.20.0/bin/opencode",
+        home / ".local/bin/opencode",
+        Path("/usr/local/bin/opencode"),
+    ):
+        if cand.is_file() or cand.is_symlink():
+            return str(cand)
+    # last resort: let Popen raise FileNotFoundError with a clear name
+    return "opencode"
 
 
 def _pick_port() -> int:
@@ -149,11 +175,15 @@ def start_serve(room_id: str, workspace: Path | None = None) -> ServeHandle:
 
     port = _pick_port()
     env = os.environ.copy()
+    # service PATH is sparse — ensure nvm node bin is visible for child tools
+    oc = _opencode_bin()
+    oc_dir = str(Path(oc).resolve().parent)
+    env["PATH"] = oc_dir + os.pathsep + env.get("PATH", "")
     # non-interactive: OpenRouter key already in env for the service user
     log_path = ws / ".opencode-serve.log"
     logf = open(log_path, "ab", buffering=0)  # noqa: SIM115 — owned by process lifetime
     proc = subprocess.Popen(
-        ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
+        [oc, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
         cwd=str(ws), env=env, stdout=logf, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
@@ -274,30 +304,63 @@ def _usage_from_session(port: int, sid: str) -> dict:
     }
 
 
+# OpenCode primary agents (native): build executes tools; plan is read-only planning.
+_AGENT_BY_MODE = {
+    "build": "build",
+    "plan": "plan",
+    "ask": "plan",   # ask ≈ plan: answer without edits
+}
+
+
 def chat(provider, payload: dict, *, room_id: str,
          on_delta: Callable | None = None,
-         abort: threading.Event | None = None) -> tuple[str, dict]:
+         abort: threading.Event | None = None,
+         agent: str | None = None,
+         variant: str | None = None) -> tuple[str, dict]:
     """Drive ONE OpenCode message; bridge SSE deltas → on_delta; return (text, usage).
 
     Window mode: one forward answer per turn. Heartbeat/tool/delta frames keep the
-    stream alive during long parks (R2).
+    stream alive during long parks (R2). `agent` selects OpenCode primary agent
+    (build|plan); `variant` is reasoning effort when the model supports it.
     """
     if _MOCK_CHAT is not None:
-        return _MOCK_CHAT(provider, payload, room_id=room_id, on_delta=on_delta, abort=abort)
+        return _MOCK_CHAT(provider, payload, room_id=room_id, on_delta=on_delta,
+                          abort=abort, agent=agent, variant=variant)
 
     h = attach_or_create_session(room_id)
     assert h.session_id
     prompt = _payload_to_prompt(payload)
     model = _parse_model(provider)
+    agent_name = agent or "build"
 
-    # SSE listener: collect text + forward deltas/heartbeats
+    # SSE listener: collect text + tool/status lines + forward deltas/heartbeats
     text_parts: list[str] = []
+    tool_lines: list[str] = []
     seen_text = ""
     idle = threading.Event()
     err_box: list[BaseException] = []
+    last_tool_key = ""
+
+    def _emit(chunk: str) -> bool:
+        """Forward to on_delta; return False if abort raised."""
+        if not chunk:
+            # heartbeat / keep-alive
+            if on_delta is not None:
+                try:
+                    on_delta("")
+                except Exception:  # noqa: BLE001
+                    return False
+            return True
+        text_parts.append(chunk)
+        if on_delta is not None:
+            try:
+                on_delta(chunk)
+            except Exception:  # noqa: BLE001
+                return False
+        return True
 
     def sse_loop():
-        nonlocal seen_text
+        nonlocal seen_text, last_tool_key
         try:
             r = Request(f"{_base(h.port)}/event")
             with urlopen(r, timeout=600) as resp:
@@ -316,40 +379,47 @@ def chat(provider, payload: dict, *, room_id: str,
                     typ = ev.get("type") or ""
                     props = ev.get("properties") or {}
                     if typ == "server.heartbeat":
-                        if on_delta is not None:
-                            try:
-                                on_delta("")   # keep Fusion SSE alive (R2)
-                            except Exception:  # noqa: BLE001 — abort raises
-                                idle.set()
-                                return
+                        if not _emit(""):
+                            idle.set()
+                            return
                         continue
                     if typ == "message.part.delta":
                         delta = props.get("delta") or props.get("text") or ""
-                        if delta and on_delta is not None:
-                            try:
-                                on_delta(delta)
-                            except Exception:  # noqa: BLE001
-                                idle.set()
-                                return
-                        if delta:
-                            text_parts.append(delta)
+                        if delta and not _emit(delta):
+                            idle.set()
+                            return
                         continue
                     if typ == "message.part.updated":
                         part = props.get("part") or {}
-                        if part.get("type") == "text":
+                        ptype = part.get("type")
+                        if ptype == "text":
                             full = part.get("text") or ""
                             if full and full != seen_text:
-                                # emit only the growth when delta frames were missing
                                 if full.startswith(seen_text):
                                     chunk = full[len(seen_text):]
-                                    if chunk and on_delta is not None and not text_parts:
-                                        try:
-                                            on_delta(chunk)
-                                        except Exception:  # noqa: BLE001
+                                    # only emit growth when no delta frames arrived
+                                    if chunk and not text_parts:
+                                        if not _emit(chunk):
                                             idle.set()
                                             return
                                 seen_text = full
+                        elif ptype == "tool":
+                            tool = part.get("tool") or "tool"
+                            state = (part.get("state") or {}).get("status") or ""
+                            key = f"{tool}:{state}"
+                            if key != last_tool_key and state:
+                                last_tool_key = key
+                                note = f"\n`[{tool} · {state}]`\n"
+                                tool_lines.append(note)
+                                if not _emit(note):
+                                    idle.set()
+                                    return
                         continue
+                    if typ in ("session.error", "message.error"):
+                        msg = props.get("message") or props.get("error") or typ
+                        err_box.append(RuntimeError(str(msg)))
+                        idle.set()
+                        return
                     if typ == "session.idle":
                         idle.set()
                         return
@@ -361,12 +431,27 @@ def chat(provider, payload: dict, *, room_id: str,
     th.start()
     time.sleep(0.3)  # let the SSE connect before the message
 
-    body = {"parts": [{"type": "text", "text": prompt}], "model": model}
+    body: dict[str, Any] = {
+        "parts": [{"type": "text", "text": prompt}],
+        "model": model,
+        "agent": agent_name,
+    }
+    if variant:
+        body["variant"] = variant
+    sys = (payload.get("system") or "").strip()
+    if sys:
+        body["system"] = sys
+
     try:
         resp = _req("POST", f"{_base(h.port)}/session/{h.session_id}/message", body, timeout=600)
     except HTTPError as e:
         idle.set()
-        raise RuntimeError(f"opencode message failed: HTTP {e.code}") from e
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:400]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(f"opencode message failed: HTTP {e.code} {detail}") from e
     except URLError as e:
         idle.set()
         raise RuntimeError(f"opencode message failed: {e}") from e
@@ -380,7 +465,7 @@ def chat(provider, payload: dict, *, room_id: str,
         time.sleep(0.2)
     idle.set()
 
-    # final text: prefer streamed parts; fall back to response body
+    # final text: prefer streamed parts; fall back to response body / seen_text
     text = "".join(text_parts) or seen_text
     if not text and isinstance(resp, dict):
         for p in resp.get("parts") or []:
