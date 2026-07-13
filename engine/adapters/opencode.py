@@ -105,10 +105,13 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
     mcp_cmd = _channel_mcp_command(room_id)
     from .. import settings
     mcp_env = {
+        "PYTHONPATH": str(settings.REPO_ROOT),
         "RESEARCH_ROOM_VAULT": str(settings.VAULT_DIR),
         "RESEARCH_ROOM_CONFIG": str(settings.CONFIG_TOML),
         "RESEARCH_ROOM_HOME": str(settings.CONFIG_DIR),
         "RESEARCH_ROOM_SECRETS": str(settings.SECRETS_FILE),
+        "FUSION_MCP_LOG": "/tmp/fusion-channel-mcp.log",
+        "FUSION_REPO": str(settings.REPO_ROOT),
     }
     oc = ws / "opencode.json"
     oc.write_text(json.dumps({
@@ -119,6 +122,8 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
                 "command": mcp_cmd,
                 "enabled": True,
                 "environment": mcp_env,
+                # OpenCode default connect timeout is 30s; give cold starts headroom
+                "timeout": 120000,
             }
         },
         "permission": {
@@ -131,13 +136,34 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
 
 
 def _channel_mcp_command(room_id: str) -> list[str]:
-    """stdio MCP launcher for the diplomatic channel tools."""
+    """stdio MCP launcher for the diplomatic channel tools.
+
+    Prefer a native-ext4 copy of channel_mcp.py under ~/fusion-mcp so OpenCode's
+    30s MCP connect budget isn't burned on /mnt/c spawn. PYTHONPATH still points
+    at the repo for engine.channel.
+    """
+    home = Path(os.environ.get("HOME") or Path.home())
+    native_py = home / "fusion-mcp" / "channel_mcp.py"
     repo = Path(__file__).resolve().parents[2]
-    # Prefer the venv python the service already uses (full path — service PATH is sparse).
+    # keep native copy in sync with repo
+    src = repo / "engine" / "channel_mcp.py"
+    try:
+        native_py.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_file() and (
+            not native_py.is_file()
+            or native_py.stat().st_mtime < src.stat().st_mtime
+        ):
+            native_py.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            native_py.chmod(0o755)
+    except Exception:  # noqa: BLE001
+        pass
+    py = shutil.which("python3") or "/usr/bin/python3"
+    if native_py.is_file():
+        return [py, str(native_py), room_id]
     venv_py = repo / ".venv" / "bin" / "python"
-    py = str(venv_py) if venv_py.is_file() else (shutil.which("python3") or "python3")
-    script = str(repo / "engine" / "channel_mcp.py")
-    return [py, script, room_id]
+    if venv_py.is_file():
+        py = str(venv_py)
+    return [py, str(src), room_id]
 
 
 def _opencode_bin() -> str:
