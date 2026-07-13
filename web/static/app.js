@@ -2658,23 +2658,39 @@ function openCodePane() {
   renderCodePane();
   startOutboxPoll();   // surface ask_design_question while the turn is parked
   codeStatus("attaching OpenCode session…", true);
-  // force_new so we never keep a stale session that lacks fusion MCP tools
-  api(`/rooms/${STATE.room.id}/code/attach`, "POST", { force_new: true }).then((d) => {
+  STATE.codeMcp = null;   // show mcp:… while attaching
+  renderCodePane();
+  // First open of a room: force_new. Re-open: soft attach (reuse if MCP already ok).
+  const forceNew = !STATE.room.workspace_path;
+  api(`/rooms/${STATE.room.id}/code/attach`, "POST", { force_new: forceNew }).then((d) => {
     if (STATE.room && d.room) {
       STATE.room.workspace_path = d.workspace || d.room.workspace_path || STATE.room.workspace_path;
       if (d.room.code_seats) STATE.room.code_seats = d.room.code_seats;
       if (d.code_turns) STATE.codeTurns = d.code_turns;
-      renderCodePane();
     }
     const sid = d.session_id ? d.session_id.slice(0, 12) : "?";
     STATE.codeMcp = !!d.mcp_connected;
+    // If still missing, one more force-new retry (MCP can lag on cold serve)
+    if (!STATE.codeMcp) {
+      codeStatus("mcp not ready — retrying attach…", true);
+      return api(`/rooms/${STATE.room.id}/code/attach`, "POST", { force_new: true }).then((d2) => {
+        if (STATE.room && d2.room) {
+          STATE.room.workspace_path = d2.workspace || d2.room.workspace_path || STATE.room.workspace_path;
+          if (d2.code_turns) STATE.codeTurns = d2.code_turns;
+        }
+        STATE.codeMcp = !!d2.mcp_connected;
+        const sid2 = d2.session_id ? d2.session_id.slice(0, 12) : "?";
+        const mcp = STATE.codeMcp ? "mcp:ok" : "mcp:MISSING";
+        codeStatus(`ready · ${mcp} · session ${sid2} · :${d2.port || "?"}`);
+        renderCodePane();
+        refreshOutbox();
+      });
+    }
     const mcp = STATE.codeMcp ? "mcp:ok" : "mcp:MISSING";
     codeStatus(`ready · ${mcp} · session ${sid} · :${d.port || "?"}`);
-    renderCodePane();   // refresh meta mcp badge
+    renderCodePane();
     refreshOutbox();
   }).catch((e) => {
-    // Surface the real failure (service not restarted / opencode missing / workspace) —
-    // send will re-attach via the stream endpoint, so this is advisory.
     STATE.codeMcp = false;
     renderCodePane();
     codeStatus(`attach failed: ${e.message} — try send (re-attaches) or restart fusion`);
