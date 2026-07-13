@@ -27,6 +27,9 @@ from urllib.request import Request, urlopen
 # generous read for long agent turns; connect stays tight
 _HTTP_TIMEOUT = 30
 _SERVE_READY_S = 20
+# OpenCode turns can run 10–20+ min (tools + thinking). POST /message blocks until
+# the turn completes; SSE needs the same ceiling. 30 min matches a long Build.
+_TURN_TIMEOUT_S = 1800
 _DEFAULT_MODEL = {
     "providerID": "openrouter",
     "modelID": "deepseek/deepseek-v4-flash",
@@ -416,8 +419,9 @@ def chat(provider, payload: dict, *, room_id: str,
     def sse_loop():
         nonlocal seen_text, last_tool_key
         try:
+            # timeout is per-read idle; heartbeats keep it alive during long thinks
             r = Request(f"{_base(h.port)}/event")
-            with urlopen(r, timeout=600) as resp:
+            with urlopen(r, timeout=_TURN_TIMEOUT_S) as resp:
                 for raw in resp:
                     if abort is not None and abort.is_set():
                         break
@@ -468,6 +472,14 @@ def chat(provider, payload: dict, *, room_id: str,
                                 if not _emit(note):
                                     idle.set()
                                     return
+                        elif ptype == "reasoning":
+                            # surface thinking briefly so the pane doesn't look stalled
+                            rsn = part.get("text") or part.get("reasoning") or ""
+                            if rsn and len(rsn) > 40:
+                                # don't dump full reasoning every update — status only
+                                if not _emit(""):
+                                    idle.set()
+                                    return
                         continue
                     if typ in ("session.error", "message.error"):
                         msg = props.get("message") or props.get("error") or typ
@@ -496,8 +508,15 @@ def chat(provider, payload: dict, *, room_id: str,
     if sys:
         body["system"] = sys
 
+    # POST /message is blocking until the turn finishes — must match turn budget.
     try:
-        resp = _req("POST", f"{_base(h.port)}/session/{h.session_id}/message", body, timeout=600)
+        resp = _req("POST", f"{_base(h.port)}/session/{h.session_id}/message",
+                    body, timeout=_TURN_TIMEOUT_S)
+    except TimeoutError as e:
+        idle.set()
+        raise RuntimeError(
+            f"opencode turn timed out after {_TURN_TIMEOUT_S // 60} min — "
+            "the agent was still working; try a shorter prompt or retry") from e
     except HTTPError as e:
         idle.set()
         detail = ""
@@ -508,10 +527,16 @@ def chat(provider, payload: dict, *, room_id: str,
         raise RuntimeError(f"opencode message failed: HTTP {e.code} {detail}") from e
     except URLError as e:
         idle.set()
+        # urllib wraps socket.timeout as URLError(TimeoutError(...))
+        reason = getattr(e, "reason", e)
+        if isinstance(reason, TimeoutError) or "timed out" in str(e).lower():
+            raise RuntimeError(
+                f"opencode turn timed out after {_TURN_TIMEOUT_S // 60} min — "
+                "the agent was still working; try a shorter prompt or retry") from e
         raise RuntimeError(f"opencode message failed: {e}") from e
 
-    # wait for idle (or abort)
-    deadline = time.time() + 600
+    # wait for idle (or abort) — POST may return before final SSE idle
+    deadline = time.time() + 30  # short grace after POST returns
     while not idle.is_set() and time.time() < deadline:
         if abort is not None and abort.is_set():
             interrupt(room_id)

@@ -2458,12 +2458,19 @@ function codeSeatOptions() {
 function renderCodeStream() {
   const box = $("#code-stream");
   if (!box) return;
+  // Phase 37 pin rule: only stick to bottom if already at the edge (or first paint).
+  // Scrolling up mid-stream must not yank the reader back to the tail.
+  const pin = box.scrollTop + box.clientHeight >= box.scrollHeight - 40
+    || !box.dataset.hasContent;
+  const savedTop = box.scrollTop;
   box.innerHTML = "";
   const turns = STATE.codeTurns || [];
   if (!turns.length && !STATE.codeStreaming) {
     box.innerHTML = '<div class="empty">Code seat harness — replies stay here. Main only via outbox.</div>';
+    delete box.dataset.hasContent;
     return;
   }
+  box.dataset.hasContent = "1";
   for (const t of turns) {
     const isQ = t.role === "human";
     const div = el("div", "code-turn " + (isQ ? "q" : "a"));
@@ -2482,7 +2489,8 @@ function renderCodeStream() {
     const body = el("div", "body"); renderMd(body, STATE.codeStreaming.text || "…"); div.appendChild(body);
     box.appendChild(div);
   }
-  box.scrollTop = box.scrollHeight;
+  if (pin) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = savedTop;
 }
 
 function renderCodeModes() {
