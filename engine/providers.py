@@ -518,11 +518,16 @@ def _guard_artifacts(payload: dict, artifacts_dir: str | None) -> dict:
 # Phase 39 — code-channel awareness. Folded into EVERY seat (incl. non-agent) so the
 # panel/judge know what from_code notes mean. System-slot only; never transcript content.
 CODE_CHANNEL_GUARD = (
-    "A code seat may be attached to this room. Notes with meta.from_code are comments "
-    "from that seat on the work in progress — treat them as deliberate crossings into "
-    "the main transcript (they passed outbox/approval). The code seat has MCP tools for "
-    "diplomatic crossing (comment_to_main, query_main_state, ask_design_question, "
-    "workspace_status, request_compaction); other seats do not call those tools."
+    "Code seat channel: a coding harness may be attached. It does not sit in the blind "
+    "panel. It edits only its workspace and reaches this transcript solely via approved "
+    "from_code notes (and the human can instruct it in the code pane).\n"
+    "When you see a turn labeled '· code seat' / from_code: treat it as a message TO THE "
+    "ROOM — status, findings, test results, or a handshake. Respond to it (acknowledge, "
+    "use the result, or say what you need next). Do not leave it unanswered if you are "
+    "the seat being called to reply.\n"
+    "You do not call the code seat's MCP tools (comment_to_main, query_main_state, "
+    "ask_design_question, workspace_status, request_compaction). To request work from "
+    "the code seat, ask the human to relay it in the code pane."
 )
 
 

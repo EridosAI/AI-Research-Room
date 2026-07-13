@@ -511,6 +511,87 @@ def converse(room_id: str, prompt: str, addressed_to: str | None = None,
                     human_label=human_label, on_delta=on_delta)
 
 
+def _default_main_seat(room_id: str) -> str:
+    """Pick a non-agent seat to answer a code-seat note on main."""
+    room = rooms.load_room(room_id)
+    path = rooms.main_path(room_id)
+    roster = _non_agent(room.get("participants") or [])
+    judge = room.get("judge")
+    last = transcript.last_ai_speaker(path)
+    if last and not _is_agent(last):
+        return last
+    if roster:
+        return roster[0]
+    if judge and not _is_agent(judge):
+        return judge
+    enabled = _non_agent(providers.enabled() or providers.provider_keys())
+    if not enabled:
+        raise ValueError("no main seat available to react to code note")
+    return enabled[0]
+
+
+def react_to_code_note(room_id: str, *, addressed_to: str | None = None,
+                       human_label: str = "human", on_delta=None,
+                       note_id: str | None = None) -> str:
+    """One main-seat AI turn in response to a from_code note — no new human turn.
+
+    Called after comment_to_main lands so the note does not sit unanswered. The
+    seat sees full forward context (including the code note) and is instructed to
+    respond to that crossing.
+    """
+    room = rooms.load_room(room_id)
+    path = rooms.main_path(room_id)
+    turns = transcript.load(path)
+    code_notes = [
+        t for t in turns
+        if t.get("role") == "note" and (t.get("meta") or {}).get("from_code")
+    ]
+    if not code_notes:
+        raise ValueError("no from_code note to react to")
+    note = next((t for t in code_notes if t.get("id") == note_id), None) if note_id else code_notes[-1]
+    if note is None:
+        note = code_notes[-1]
+
+    seat = addressed_to or _default_main_seat(room_id)
+    if _is_agent(seat):
+        raise ValueError(f"cannot react with agent seat: {seat}")
+    providers.provider(seat)
+
+    from .context import format_turns, forward_turns, room_system
+    note_text = (note.get("text") or "").strip()
+    body = format_turns(forward_turns(turns), human_label)
+    body += (
+        f"The latest code-seat message (from_code) is:\n---\n{note_text}\n---\n"
+        f"Respond as [{seat}] to that code-seat message and the conversation. "
+        "Treat it as addressed to the room: acknowledge results, answer if needed, "
+        "or state the next step. Be concise."
+    )
+    payload = {
+        "system": room_system(seat, room.get("participants") or [], human_label),
+        "messages": [{"role": "user", "content": body}],
+    }
+
+    art_dir = artifacts.resolve_artifacts_dir(room_id)
+    efforts = room.get("reasoning_effort") or {}
+    reply = providers.call_model(
+        seat, payload, tools=True, effort="medium",
+        max_tokens=settings.CONVERSE_MAX_TOKENS,
+        reasoning_effort=efforts.get(seat),
+        artifacts_dir=art_dir, room_id=room_id, on_delta=on_delta)
+
+    meta = {
+        "model": providers.provider(seat).model,
+        "react_to_code": True,
+        "code_note_id": note.get("id"),
+        "reasoning_effort": _effort_label(seat, efforts.get(seat)),
+    }
+    meta.update(_reply_meta(reply))
+    _stamp_artifacts(meta, room_id, reply.text, art_dir)
+    transcript.append(
+        transcript.make_turn("converse", "ai", seat, reply.text, meta), path)
+    return reply.text
+
+
 def side_by_side(room_id: str, prompt: str, seats: list[str],
                  judge: str | None = None, effort: str = "medium",
                  panel_context: str | None = None) -> str:

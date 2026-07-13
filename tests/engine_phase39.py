@@ -154,10 +154,21 @@ def main() -> int:
     check("meta.from_code stamped", (note.get("meta") or {}).get("from_code") is True)
     turns = transcript.load(rooms.main_path(rid2))
     check("note on main.jsonl", any((t.get("meta") or {}).get("from_code") for t in turns))
+    # auto-react: a main AI turn should follow the from_code note
+    check("main seat reacts to from_code note",
+          any(t.get("role") == "ai" and (t.get("meta") or {}).get("react_to_code") for t in turns))
     # from_code is forward (not is_panelist_raw)
     fwd = build_context(turns, "mock", "converse", participants=["mock"])
     fwd_text = json.dumps(fwd)
     check("from_code note enters forward context", "coder notes" in fwd_text)
+    check("forward labels code seat", "code seat" in fwd_text)
+    # room_system teaches main seats about the code channel
+    from engine.context import room_system, format_turns
+    rs = room_system("mock", ["mock", "mockthink"])
+    check("room_system mentions code seat", "Code seat" in rs or "code seat" in rs)
+    check("room_system says respond to code notes", "from_code" in rs or "code-seat" in rs.lower() or "code seat" in rs)
+    labeled = format_turns([note])
+    check("format_turns marks from_code", "code seat" in labeled)
 
     # control mode: comment queues
     rooms.update_room(rid2, channel_mode="control")

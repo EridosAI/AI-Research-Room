@@ -215,6 +215,16 @@ def comment_to_main(room_id: str, text: str, *, speaker: str = "code",
         "converse", "note", speaker, text,
         {"from_code": True, "model": speaker})
     transcript.append(note, rooms.main_path(room_id))
+    # Main seats should not leave from_code notes sitting unanswered: trigger one
+    # AI reply on main (no synthetic human turn). Best-effort — never fail the
+    # diplomatic write if the reaction fails (no seat, API down, etc.).
+    react = True
+    if react:
+        try:
+            from . import modes
+            modes.react_to_code_note(room_id, note_id=note.get("id"))
+        except Exception:  # noqa: BLE001
+            pass
     return note
 
 

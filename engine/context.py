@@ -29,8 +29,16 @@ def room_system(for_speaker: str, participants: list[str] | None = None,
         f"Below is the full conversation, labeled by speaker. [{human_label}] is the researcher.\n"
         f"{others_str} are other AI participants — peers, not you.\n"
         f"Read all of it, then respond as yourself ([{for_speaker}]) to the latest "
-        f"[{human_label}] turn.\n"
-        "You may agree with, build on, or push back against what other participants said."
+        f"[{human_label}] turn — unless the latest turn is from the code seat "
+        f"(labeled · code seat / from_code), in which case respond to that message.\n"
+        "You may agree with, build on, or push back against what other participants said.\n"
+        "\n"
+        "Code seat: a separate coding harness may be attached to this room. It works in an "
+        "isolated workspace and crosses into this transcript only via approved notes "
+        "(from_code). Those notes are deliberate messages into the room — treat them as "
+        "addressed to the room (status, findings, handshakes, questions). Acknowledge or "
+        "act on them; do not ignore them. You cannot call the code seat's tools; the human "
+        "drives the code pane. You may ask the human to relay a request to the code seat."
     )
 
 
@@ -44,9 +52,17 @@ def forward_turns(transcript: list[dict]) -> list[dict]:
 def format_turns(turns: list[dict], human_label: str = "human") -> str:
     """Flatten turns into one labelled block: `[speaker]: text` per turn. The human
     role is shown as `human_label` (the user's chosen display name) — this is the only
-    place the name reaches the model; storage keeps the `human` role untouched."""
+    place the name reaches the model; storage keeps the `human` role untouched.
+    Code-seat notes are labeled so main seats can see them as deliberate crossings."""
     def lbl(t: dict) -> str:
-        return human_label if t["speaker"] == "human" else t["speaker"]
+        if t.get("speaker") == "human":
+            return human_label
+        meta = t.get("meta") or {}
+        if meta.get("from_code"):
+            return f"{t['speaker']} · code seat"
+        if meta.get("from_margin"):
+            return f"{t['speaker']} · margin"
+        return t["speaker"]
     return "".join(f"[{lbl(t)}]: {t['text']}\n\n" for t in turns)
 
 

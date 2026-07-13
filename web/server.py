@@ -759,16 +759,21 @@ def get_outbox(room_id: str) -> dict:
 
 @app.post("/rooms/{room_id}/outbox/{item_id}/approve")
 def approve_outbox(room_id: str, item_id: str, body: OutboxReplyBody | None = None) -> dict:
+    """Approve outbox item. comment_to_main writes the note and (via channel) may
+    trigger a main-seat reaction so the note does not sit unanswered."""
     _require_room(room_id)
     answer = body.answer if body else None
     try:
-        item = channel.approve(
-            room_id, item_id, answer=answer,
-            room_lock=lambda: _room_lock(room_id))
+        # Main reaction (if any) runs inside comment_to_main after the note lands;
+        # hold the room lock for the whole approve so react serializes with main rounds.
+        with _room_lock(room_id):
+            item = channel.approve(room_id, item_id, answer=answer, room_lock=None)
+            view = _full_room(room_id)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    _maybe_export(room_id)
     return {"item": item, "outbox": channel.list_outbox(room_id),
-            "transcript": _full_room(room_id)}
+            "transcript": view}
 
 
 @app.post("/rooms/{room_id}/outbox/{item_id}/reject")
