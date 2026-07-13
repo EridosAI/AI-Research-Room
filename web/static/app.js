@@ -2699,15 +2699,17 @@ async function codeSend() {
   codeStatus(`${seat} · ${mode}${reasoning ? " · " + reasoning : ""}…`, true);
   try {
     input.value = "";
-    // optimistic human turn in the CODE stream only
-    STATE.codeTurns = (STATE.codeTurns || []).concat([{
+    // optimistic human turn in the CODE stream only (tagged so we can drop it on commit)
+    const optimistic = {
       role: "human", speaker: "human", text,
-      meta: { code_mode: mode, seat, reasoning: reasoning || "default" },
-    }]);
+      meta: { code_mode: mode, seat, reasoning: reasoning || "default", _optimistic: true },
+    };
+    STATE.codeTurns = (STATE.codeTurns || []).concat([optimistic]);
     renderCodeStream();
     const data = await streamCodeSeat(roomId, { prompt: text, seat, mode, reasoning });
     if (STATE.room && STATE.room.id === roomId) {
-      STATE.codeTurns = data.code_turns || STATE.codeTurns;
+      // authoritative code.jsonl replaces optimistic bubble (avoids double human on retry/done)
+      STATE.codeTurns = data.code_turns || STATE.codeTurns.filter((t) => !(t.meta && t.meta._optimistic));
       STATE.outbox = data.outbox || STATE.outbox;
       renderCodePane();
     }
@@ -2718,7 +2720,8 @@ async function codeSend() {
       codeStatus("done");
     }
   } catch (e) {
-    // keep optimistic human turn so the failure is visible; stream may have partial ai
+    // drop optimistic-only bubble if nothing was committed; keep server-backed turns
+    STATE.codeTurns = (STATE.codeTurns || []).filter((t) => !(t.meta && t.meta._optimistic && t.text === text));
     renderCodeStream();
     if (e && e.name === "AbortError") codeStatus("stopped.");
     else codeStatus(`code failed: ${e.message}`);

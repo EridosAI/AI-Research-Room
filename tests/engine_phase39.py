@@ -307,6 +307,13 @@ def main() -> int:
               mm != {"providerID": "deepseek", "modelID": "deepseek-v4-pro"})
         check("openrouter key loader finds something or env",
               opencode._openrouter_key() is not None or True)  # may be empty in test vault
+        # 39.3d: prompt flattening must NOT wrap [system]/[user] (those leaked into the pane)
+        flat = opencode._payload_to_prompt({
+            "system": "sys line",
+            "messages": [{"role": "user", "content": "Mode: BUILD.\n\ndo the thing"}],
+        })
+        check("payload prompt is user content only", flat == "Mode: BUILD.\n\ndo the thing")
+        check("payload prompt has no system wrapper", "[system]" not in flat and "[user]" not in flat)
     finally:
         opencode._MOCK_CHAT = None
     check("code_pane_width is mutable", "code_pane_width" in rooms._MUTABLE)

@@ -334,15 +334,16 @@ def _parse_model(p) -> dict:
 
 
 def _payload_to_prompt(payload: dict) -> str:
-    """Flatten Fusion payload into a single user message for the agent turn."""
+    """User-facing prompt only. System goes in the OpenCode `system` field, not the body text.
+
+    Never wrap as `[system]/…` / `[user]\\n…` — those markers were ending up in the
+    streamed transcript when user-message parts were mirrored as deltas (39.3d).
+    """
     parts = []
-    sys = (payload.get("system") or "").strip()
-    if sys:
-        parts.append(f"[system]\n{sys}")
     for m in payload.get("messages") or []:
-        role = m.get("role") or "user"
-        content = m.get("content") or ""
-        parts.append(f"[{role}]\n{content}")
+        content = (m.get("content") or "").strip()
+        if content:
+            parts.append(content)
     return "\n\n".join(parts).strip() or "(empty)"
 
 
@@ -390,13 +391,16 @@ def chat(provider, payload: dict, *, room_id: str,
     model = _parse_model(provider)
     agent_name = agent or "build"
 
-    # SSE listener: collect text + tool/status lines + forward deltas/heartbeats
+    # SSE listener: collect ASSISTANT text + tool notes only (never re-echo user prompt).
     text_parts: list[str] = []
     tool_lines: list[str] = []
     seen_text = ""
     idle = threading.Event()
     err_box: list[BaseException] = []
     last_tool_key = ""
+    # messageID → role (filled by message.updated); only assistant parts stream to the pane
+    msg_role: dict[str, str] = {}
+    assistant_ids: set[str] = set()
 
     def _emit(chunk: str) -> bool:
         """Forward to on_delta; return False if abort raised."""
@@ -415,6 +419,13 @@ def chat(provider, payload: dict, *, room_id: str,
             except Exception:  # noqa: BLE001
                 return False
         return True
+
+    def _is_assistant(mid: str | None) -> bool:
+        if not mid:
+            return False
+        if mid in assistant_ids:
+            return True
+        return msg_role.get(mid) == "assistant"
 
     def sse_loop():
         nonlocal seen_text, last_tool_key
@@ -441,7 +452,19 @@ def chat(provider, payload: dict, *, room_id: str,
                             idle.set()
                             return
                         continue
+                    if typ == "message.updated":
+                        info = props.get("info") or {}
+                        mid = info.get("id") or ""
+                        role = info.get("role") or ""
+                        if mid and role:
+                            msg_role[mid] = role
+                            if role == "assistant":
+                                assistant_ids.add(mid)
+                        continue
                     if typ == "message.part.delta":
+                        mid = props.get("messageID") or ""
+                        if not _is_assistant(mid):
+                            continue  # skip user/system echo
                         delta = props.get("delta") or props.get("text") or ""
                         if delta and not _emit(delta):
                             idle.set()
@@ -449,8 +472,11 @@ def chat(provider, payload: dict, *, room_id: str,
                         continue
                     if typ == "message.part.updated":
                         part = props.get("part") or {}
+                        mid = part.get("messageID") or props.get("messageID") or ""
                         ptype = part.get("type")
                         if ptype == "text":
+                            if not _is_assistant(mid):
+                                continue
                             full = part.get("text") or ""
                             if full and full != seen_text:
                                 if full.startswith(seen_text):
@@ -462,6 +488,7 @@ def chat(provider, payload: dict, *, room_id: str,
                                             return
                                 seen_text = full
                         elif ptype == "tool":
+                            # tools are always on the assistant side
                             tool = part.get("tool") or "tool"
                             state = (part.get("state") or {}).get("status") or ""
                             key = f"{tool}:{state}"
@@ -473,13 +500,12 @@ def chat(provider, payload: dict, *, room_id: str,
                                     idle.set()
                                     return
                         elif ptype == "reasoning":
-                            # surface thinking briefly so the pane doesn't look stalled
-                            rsn = part.get("text") or part.get("reasoning") or ""
-                            if rsn and len(rsn) > 40:
-                                # don't dump full reasoning every update — status only
-                                if not _emit(""):
-                                    idle.set()
-                                    return
+                            if not _is_assistant(mid):
+                                continue
+                            # keep-alive only — full reasoning stays in OpenCode
+                            if not _emit(""):
+                                idle.set()
+                                return
                         continue
                     if typ in ("session.error", "message.error"):
                         msg = props.get("message") or props.get("error") or typ
@@ -544,12 +570,21 @@ def chat(provider, payload: dict, *, room_id: str,
         time.sleep(0.2)
     idle.set()
 
-    # final text: prefer streamed parts; fall back to response body / seen_text
+    # final text: streamed assistant deltas, then POST body (assistant only), then seen_text
     text = "".join(text_parts) or seen_text
-    if not text and isinstance(resp, dict):
-        for p in resp.get("parts") or []:
-            if p.get("type") == "text":
-                text += p.get("text") or ""
+    if isinstance(resp, dict):
+        info = resp.get("info") or {}
+        if info.get("role") == "assistant" or not text:
+            body_text = ""
+            for p in resp.get("parts") or []:
+                if p.get("type") == "text":
+                    body_text += p.get("text") or ""
+            # Prefer POST body when it is the assistant reply and longer than stream crumbs
+            if body_text and (info.get("role") == "assistant" or not text):
+                if info.get("role") == "assistant":
+                    text = body_text
+                elif not text:
+                    text = body_text
     usage = _usage_from_session(h.port, h.session_id)
     if err_box and not text:
         raise RuntimeError(f"opencode SSE error: {err_box[0]}")
