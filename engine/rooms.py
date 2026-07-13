@@ -68,6 +68,11 @@ def margin_path(room_id: str) -> Path:
     return _room_dir(room_id) / "margin.jsonl"
 
 
+def code_path(room_id: str) -> Path:
+    """Isolated code-seat log (Phase 39.2) — never main.jsonl."""
+    return _room_dir(room_id) / "code.jsonl"
+
+
 def rolledback_path(room_id: str) -> Path:
     return _room_dir(room_id) / "rolledback.jsonl"
 
@@ -97,6 +102,7 @@ def _default_meta(room_id: str, title: str) -> dict:
         "outbox": [],               # pending diplomatic crossings
         "opencode_port": None,      # live serve port (re-attach)
         "opencode_session_id": None,
+        "code_pane_width": None,    # px; null = CSS default (Phase 39.2)
         "ts": _now(),
     }
 
@@ -157,7 +163,7 @@ def load_room(room_id: str) -> dict:
 _MUTABLE = {"title", "participants", "judge", "margin_model",
             "splitter_width", "last_read_pos", "tags", "reasoning_effort", "artifacts_dir", "viewer_width",
             "code_seats", "workspace_path", "channel_mode", "outbox",
-            "opencode_port", "opencode_session_id"}
+            "opencode_port", "opencode_session_id", "code_pane_width"}
 
 
 def update_room(room_id: str, **fields) -> dict:

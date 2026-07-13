@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import artifacts, channel, export_md, margin, modes, providers, rooms, secrets, settings
+from engine import artifacts, channel, code_seat, export_md, margin, modes, providers, rooms, secrets, settings
 from engine import transcript as T
 from engine.adapters import opencode
 
@@ -159,6 +159,7 @@ class RoomUpdate(BaseModel):
     code_seats: list[str] | None = None    # Phase 39: agent seats (outside participants)
     workspace_path: str | None = None
     channel_mode: str | None = None        # auto | control
+    code_pane_width: float | None = None   # Phase 39.2
 
 
 class UIBody(BaseModel):
@@ -335,6 +336,7 @@ def _room_view(meta: dict, turns: list[dict] | None = None) -> dict:
         "workspace_path": meta.get("workspace_path") or "",
         "channel_mode": meta.get("channel_mode") or "auto",
         "outbox": meta.get("outbox") or [],
+        "code_pane_width": meta.get("code_pane_width"),
         "last_read_pos": last_read,
         "turn_count": len(turns),
         "unread": len(turns) > last_read,
@@ -353,6 +355,7 @@ def _full_room(room_id: str) -> dict:
     view = _room_view(meta, turns)
     view["turns"] = turns
     view["margin_turns"] = T.load(rooms.margin_path(room_id))
+    view["code_turns"] = T.load(rooms.code_path(room_id))
     view["active"] = True
     return view
 
@@ -791,7 +794,88 @@ def attach_code_seat(room_id: str) -> dict:
         "port": h.port,
         "session_id": h.session_id,
         "room": _room_view(rooms.load_room(room_id)),
+        "code_turns": code_seat.load_turns(room_id),
     }
+
+
+class CodeBody(BaseModel):
+    prompt: str
+    seat: str | None = None
+    mode: str = "build"   # build | ask
+
+
+@app.post("/rooms/{room_id}/code/run/stream")
+async def code_run_stream(room_id: str, body: CodeBody, request: Request):
+    """Isolated code-seat stream (Phase 39.2). Writes code.jsonl only — never main.
+
+    SSE: delta {text} → done {result, code_turns, outbox} | error {message}.
+    Disconnect → abort + OpenCode interrupt + cancel channel waiters.
+    """
+    _require_room(room_id)
+    if not body.prompt.strip():
+        raise HTTPException(400, "prompt required")
+    if body.seat and body.seat not in providers.registry():
+        raise HTTPException(400, f"unknown provider: {body.seat}")
+    if body.mode not in ("build", "ask"):
+        raise HTTPException(400, "mode must be build|ask")
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    abort = threading.Event()
+
+    def emit(item):
+        loop.call_soon_threadsafe(q.put_nowait, item)
+
+    def on_delta(chunk):
+        if abort.is_set():
+            raise _StreamAborted()
+        emit(("delta", {"text": chunk}))
+
+    def worker():
+        try:
+            # code seat does NOT take the main room lock — isolation from main rounds
+            result = code_seat.code_turn(
+                room_id, body.prompt, seat=body.seat, mode=body.mode,
+                on_delta=on_delta, abort=abort)
+            emit(("done", {
+                "result": result,
+                "room_id": room_id,
+                "code_turns": code_seat.load_turns(room_id),
+                "outbox": channel.list_outbox(room_id),
+            }))
+        except _StreamAborted:
+            pass
+        except (FileNotFoundError, ValueError) as e:
+            emit(("error", {"message": str(e)}))
+        except Exception as e:  # noqa: BLE001
+            emit(("error", {"message": f"{type(e).__name__}: {e}"}))
+        finally:
+            emit(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    continue
+                if item is None:
+                    break
+                kind, data = item
+                yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+        finally:
+            abort.set()
+            try:
+                opencode.interrupt(room_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ---- markdown artifacts (Phase 14D) -----------------------------------------

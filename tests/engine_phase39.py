@@ -44,7 +44,7 @@ os.environ["RESEARCH_ROOM_SECRETS"] = str(Path(_TMP) / "secrets.json")
 os.environ["RESEARCH_ROOM_UI"] = str(Path(_TMP) / "ui.json")
 sys.path.insert(0, str(REPO))
 
-from engine import channel, modes, providers, rooms, transcript  # noqa: E402
+from engine import channel, code_seat, modes, providers, rooms, transcript  # noqa: E402
 from engine.adapters import opencode  # noqa: E402
 from engine.context import build_context  # noqa: E402
 
@@ -262,6 +262,36 @@ def main() -> int:
     bad = transcript.make_turn("converse", "note", "x", "y", {})
     check("mutation: note without from_code lacks stamp",
           not (bad.get("meta") or {}).get("from_code"))
+
+    # ---- 39.2 isolation: code_turn never writes main --------------------------
+    print("39.2 code seat isolation — code.jsonl only")
+    rid3 = rooms.create_room("iso", participants=["mock"], judge="mock")
+    rooms.update_room(rid3, code_seats=["mockagent"])
+    main_before = transcript.load(rooms.main_path(rid3))
+    opencode._MOCK_CHAT = mock_chat
+    try:
+        out = code_seat.code_turn(rid3, "implement isolation", seat="mockagent", mode="build")
+        check("code_turn returns agent text", "agent:mockagent" in out and "Mode: BUILD" in out)
+        code_turns = code_seat.load_turns(rid3)
+        check("code.jsonl has human+ai", len(code_turns) == 2
+              and code_turns[0]["role"] == "human" and code_turns[1]["role"] == "ai")
+        check("code mode stamped", (code_turns[0].get("meta") or {}).get("code_mode") == "build")
+        main_after = transcript.load(rooms.main_path(rid3))
+        check("main.jsonl unchanged by code_turn", main_before == main_after)
+        # ask mode prefix reaches the adapter payload
+        seen_payload = []
+        def cap_chat(p, payload, *, room_id, on_delta=None, abort=None):
+            seen_payload.append(payload)
+            return mock_chat(p, payload, room_id=room_id, on_delta=on_delta, abort=abort)
+        opencode._MOCK_CHAT = cap_chat
+        code_seat.code_turn(rid3, "why this?", seat="mockagent", mode="ask")
+        body = (seen_payload[-1].get("messages") or [{}])[-1].get("content") or ""
+        check("ask mode prefixes prompt", body.startswith("Mode: ASK") and "why this?" in body)
+    finally:
+        opencode._MOCK_CHAT = None
+    check("code_pane_width is mutable", "code_pane_width" in rooms._MUTABLE)
+    rooms.update_room(rid3, code_pane_width=720)
+    check("code_pane_width round-trip", rooms.load_room(rid3).get("code_pane_width") == 720)
 
     print()
     print(f"{'ALL PASS' if _fails == 0 else f'{_fails} FAILED'}")

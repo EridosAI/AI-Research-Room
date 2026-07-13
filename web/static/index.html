@@ -262,12 +262,13 @@
         <div id="margin-status" class="status"></div>
       </aside>
 
-      <!-- code seat pane (Phase 39): window-mode seat + diplomatic outbox -->
-      <div id="code-splitter" class="margin-splitter hidden"></div>
-      <aside id="code-pane" class="margin code-pane hidden">
+      <!-- code seat pane (Phase 39/39.2): isolated harness + diplomatic outbox.
+           Between main transcript and margin so ultrawide can give it real width. -->
+      <div id="code-splitter" class="code-splitter hidden"></div>
+      <aside id="code-pane" class="code-pane hidden">
         <div class="margin-head">
           <span class="margin-title">code</span>
-          <select id="code-seat" title="code seat (agent provider)"></select>
+          <select id="code-seat" title="code seat (provider)"></select>
           <select id="channel-mode" title="outbox approval mode">
             <option value="auto">auto</option>
             <option value="control">control</option>
@@ -275,10 +276,18 @@
           <button id="code-close" title="hide the code pane">×</button>
         </div>
         <div id="code-meta" class="code-meta"></div>
+        <div id="code-stream" class="code-stream"></div>
         <div id="outbox-list" class="outbox-list"></div>
-        <div class="margin-composer">
-          <textarea id="code-input" rows="2" placeholder="message the code seat… (Enter to send)"></textarea>
-          <button id="code-send">send</button>
+        <div class="code-harness">
+          <div class="code-harness-modes" title="harness mode — stays inside the code seat">
+            <button type="button" id="code-mode-build" class="code-mode active" data-mode="build">Build</button>
+            <button type="button" id="code-mode-ask" class="code-mode" data-mode="ask">Ask</button>
+            <span class="code-harness-hint">code seat only · main via outbox</span>
+          </div>
+          <div class="margin-composer code-composer">
+            <textarea id="code-input" rows="3" placeholder="Instruct the code seat… (Enter to send · Shift+Enter newline)"></textarea>
+            <button id="code-send" title="send to code seat only — never main transcript">send to code</button>
+          </div>
         </div>
         <div id="code-status" class="status"></div>
       </aside>

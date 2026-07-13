@@ -144,6 +144,15 @@ def main() -> int:
             body = page.locator("#outbox-list").inner_text()
             check("outbox shows pending crossing", "pending note" in body or "comment_to_main" in body)
             check("channel-mode select present", page.locator("#channel-mode").count() == 1)
+            # 39.2 harness chrome
+            check("Build mode button present", page.locator("#code-mode-build").count() == 1)
+            check("Ask mode button present", page.locator("#code-mode-ask").count() == 1)
+            check("send-to-code label", "code" in (page.locator("#code-send").inner_text() or "").lower())
+            check("code stream present", page.locator("#code-stream").count() == 1)
+            check("code splitter present", page.locator("#code-splitter").count() == 1)
+            # ultrawide-ish width: code pane default min width
+            cw = page.locator("#code-pane").evaluate("e => e.getBoundingClientRect().width")
+            check("code pane is wide (>= 360)", cw >= 360)
             page.click("#code-close")
             page.wait_for_timeout(200)
             check("code pane closes", page.locator("#code-pane").evaluate(

@@ -33,6 +33,10 @@ let STATE = {
   marginOpen: false,
   viewerOpen: false,         // artifact viewer pane (Phase 33); mutually exclusive with the margin
   codeOpen: false,           // code seat pane + outbox (Phase 39)
+  codeTurns: [],             // isolated code.jsonl turns (Phase 39.2) — never main
+  codeMode: "build",         // harness mode: build | ask
+  codeStreaming: null,       // live code-seat bubble {text}
+  codeAbort: null,           // AbortController for code stream
   outbox: [],                // pending diplomatic crossings for the active room
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
@@ -1821,9 +1825,11 @@ function adoptRoom(view) {
     code_seats: view.code_seats || [],
     workspace_path: view.workspace_path || "",
     channel_mode: view.channel_mode || "auto",
+    code_pane_width: view.code_pane_width || null,
   };
   STATE.turns = view.turns || [];
   STATE.outbox = view.outbox || [];
+  if (view.code_turns !== undefined) STATE.codeTurns = view.code_turns || [];
   STATE.pending = null;                 // authoritative turns supersede any optimistic bubble (Phase 31.3)
   // A live converse stream belongs to ONE room; switching away detaches its bubble so it never
   // paints into another room (the stream keeps draining server-side as a background round). (36.4)
@@ -1836,6 +1842,7 @@ function adoptRoom(view) {
   renderCodePane();
   if (STATE.marginOpen) applyMarginWidth();
   if (STATE.viewerOpen) applyViewerWidth();
+  if (STATE.codeOpen) applyCodeWidth();
   watchActiveRoom(!!view.running);      // round-in-progress signal (Phase 30)
 }
 
@@ -2439,6 +2446,42 @@ function codeSeatOptions() {
   return all.filter((k, i) => all.indexOf(k) === i);
 }
 
+function renderCodeStream() {
+  const box = $("#code-stream");
+  if (!box) return;
+  box.innerHTML = "";
+  const turns = STATE.codeTurns || [];
+  if (!turns.length && !STATE.codeStreaming) {
+    box.innerHTML = '<div class="empty">Code seat harness — replies stay here. Main only via outbox.</div>';
+    return;
+  }
+  for (const t of turns) {
+    const isQ = t.role === "human";
+    const div = el("div", "code-turn " + (isQ ? "q" : "a"));
+    const mode = (t.meta && t.meta.code_mode) || "";
+    const extra = mode ? mode : "";
+    div.appendChild(whoLine(isQ ? "you" : t.speaker, colorOf(isQ ? "human" : t.speaker), extra));
+    const body = el("div", "body"); renderMd(body, t.text); div.appendChild(body);
+    box.appendChild(div);
+  }
+  if (STATE.codeStreaming) {
+    const div = el("div", "code-turn a streaming");
+    div.appendChild(whoLine(
+      (STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || "code",
+      colorOf((STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || "human"),
+      STATE.codeMode || "build"));
+    const body = el("div", "body"); renderMd(body, STATE.codeStreaming.text || "…"); div.appendChild(body);
+    box.appendChild(div);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderCodeModes() {
+  document.querySelectorAll(".code-mode").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === STATE.codeMode);
+  });
+}
+
 function renderCodePane() {
   const seatSel = $("#code-seat");
   const modeSel = $("#channel-mode");
@@ -2462,6 +2505,8 @@ function renderCodePane() {
     const seatLabel = cur || "—";
     meta.textContent = `seat: ${seatLabel} · workspace: ${ws}`;
   }
+  renderCodeModes();
+  renderCodeStream();
   list.innerHTML = "";
   const pending = (STATE.outbox || []).filter((i) => i.status === "pending");
   if (!pending.length) {
@@ -2518,6 +2563,17 @@ async function rejectOutbox(itemId) {
   } catch (e) { codeStatus(e.message); }
 }
 
+function codeWidth() {
+  return (STATE.room && STATE.room.code_pane_width) || Math.min(Math.floor(workspaceWidth() * 0.45), 900);
+}
+
+function applyCodeWidth() {
+  const pane = $("#code-pane");
+  if (!pane || !STATE.codeOpen) return;
+  const w = STATE.room && STATE.room.code_pane_width;
+  pane.style.width = (w || codeWidth()) + "px";
+}
+
 function openCodePane() {
   if (!STATE.room) return;
   STATE.codeOpen = true;
@@ -2530,11 +2586,13 @@ function openCodePane() {
     STATE.room.code_seats = [seats[0]];
     api(`/rooms/${STATE.room.id}`, "PUT", { code_seats: STATE.room.code_seats }).catch(() => {});
   }
+  applyCodeWidth();
   renderCodePane();
   api(`/rooms/${STATE.room.id}/code/attach`, "POST").then((d) => {
     if (STATE.room && d.room) {
       STATE.room.workspace_path = d.room.workspace_path || STATE.room.workspace_path;
       if (d.room.code_seats) STATE.room.code_seats = d.room.code_seats;
+      if (d.code_turns) STATE.codeTurns = d.code_turns;
       renderCodePane();
     }
   }).catch((e) => codeStatus(`attach: ${e.message}`));
@@ -2542,13 +2600,68 @@ function openCodePane() {
 
 function closeCodePane() {
   STATE.codeOpen = false;
+  if (STATE.codeAbort) { try { STATE.codeAbort.abort(); } catch (_e) { /* */ } }
+  STATE.codeStreaming = null;
   $("#code-pane").classList.add("hidden");
   $("#code-splitter").classList.add("hidden");
   focusComposer();
 }
 
+async function streamCodeSeat(roomId, body) {
+  // Isolated SSE path — never touches main transcript / streamConverse.
+  const ctrl = new AbortController();
+  STATE.codeAbort = ctrl;
+  STATE.codeStreaming = { text: "" };
+  renderCodeStream();
+  let raf = 0;
+  try {
+    const res = await fetch(`/rooms/${roomId}/code/run/stream`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail || `${res.status} ${res.statusText}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", done = null, errMsg = null;
+    const paint = () => { raf = 0; renderCodeStream(); };
+    while (true) {
+      const { value, done: rdDone } = await reader.read();
+      if (rdDone) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        let ev = null, dat = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) dat = line.slice(5).trim();
+        }
+        if (ev === "delta") {
+          const chunk = (JSON.parse(dat).text) || "";
+          if (STATE.codeStreaming) {
+            STATE.codeStreaming.text += chunk;
+            if (!raf) raf = requestAnimationFrame(paint);
+          }
+        } else if (ev === "done") { done = JSON.parse(dat); }
+        else if (ev === "error") { errMsg = JSON.parse(dat).message || "stream error"; }
+      }
+    }
+    if (raf) cancelAnimationFrame(raf);
+    if (errMsg) throw new Error(errMsg);
+    if (!done) throw new Error("code stream ended without done");
+    return done;
+  } finally {
+    STATE.codeAbort = null;
+    STATE.codeStreaming = null;
+  }
+}
+
 async function codeSend() {
   if (!STATE.room) return;
+  if (STATE.codeStreaming) { codeStatus("code seat already working…"); return; }
   const input = $("#code-input");
   const text = (input && input.value || "").trim();
   if (!text) return;
@@ -2556,21 +2669,33 @@ async function codeSend() {
     || (STATE.room.code_seats && STATE.room.code_seats[0]);
   if (!seat) { codeStatus("pick a code seat first."); return; }
   const roomId = STATE.room.id;
-  codeStatus(`${seat} working…`, true);
+  const mainCountBefore = (STATE.turns || []).length;
+  const mode = STATE.codeMode || "build";
+  codeStatus(`${seat} · ${mode}…`, true);
   try {
-    // window-mode converse addressed to the agent seat (streams via existing path)
-    const sel = { mode: "converse", prompt: text, target: seat };
     input.value = "";
-    STATE.pending = { text, ts: Date.now() }; render();
-    const data = await streamConverse(roomId, sel);
-    if (STATE.room && STATE.room.id === data.room_id) {
-      adoptRoom(data.transcript);
-      await markRead(roomId, data.transcript.turn_count);
+    // optimistic human turn in the CODE stream only
+    STATE.codeTurns = (STATE.codeTurns || []).concat([{
+      role: "human", speaker: "human", text,
+      meta: { code_mode: mode, seat },
+    }]);
+    renderCodeStream();
+    const data = await streamCodeSeat(roomId, { prompt: text, seat, mode });
+    if (STATE.room && STATE.room.id === roomId) {
+      STATE.codeTurns = data.code_turns || STATE.codeTurns;
+      STATE.outbox = data.outbox || STATE.outbox;
+      renderCodePane();
     }
-    await refreshRooms();
-    codeStatus("");
+    // isolation invariant: main transcript length must not grow from a code-pane send
+    if ((STATE.turns || []).length !== mainCountBefore) {
+      codeStatus("warning: main transcript changed during code send");
+    } else {
+      codeStatus("");
+    }
   } catch (e) {
-    STATE.pending = null; render();
+    // drop optimistic tail if stream failed before commit
+    STATE.codeTurns = (STATE.codeTurns || []).filter((t) => t.id || t.role !== "human" || t.text !== text);
+    renderCodeStream();
     if (e && e.name === "AbortError") codeStatus("stopped.");
     else codeStatus(`code failed: ${e.message}`);
   }
@@ -2612,6 +2737,12 @@ const _codeInput = $("#code-input");
 if (_codeInput) _codeInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); codeSend(); }
 });
+document.querySelectorAll(".code-mode").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    STATE.codeMode = btn.dataset.mode || "build";
+    renderCodeModes();
+  });
+});
 const _channelMode = $("#channel-mode");
 if (_channelMode) _channelMode.addEventListener("change", async (e) => {
   if (!STATE.room) return;
@@ -2626,7 +2757,33 @@ if (_codeSeat) _codeSeat.addEventListener("change", async (e) => {
   const seats = v ? [v] : [];
   STATE.room.code_seats = seats;
   try { await api(`/rooms/${STATE.room.id}`, "PUT", { code_seats: seats }); } catch (_e) { /* */ }
+  renderCodePane();
 });
+(function wireCodeSplitter() {
+  const rez = $("#code-splitter"); if (!rez) return;
+  let dragging = false;
+  rez.addEventListener("mousedown", (e) => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging || !STATE.codeOpen) return;
+    // code pane sits between main and margin: width = distance from splitter to right edge of code area
+    const pane = $("#code-pane"); if (!pane) return;
+    const rect = pane.getBoundingClientRect();
+    // dragging the left edge of the code pane
+    const rightEdge = rect.right;
+    const marginStuff = STATE.marginOpen ? marginWidth() + SPLITTER_PX : 0;
+    const dynMax = Math.max(360, workspaceWidth() - MIN_MAIN - SPLITTER_PX - marginStuff);
+    const w = Math.max(360, Math.min(dynMax, rightEdge - e.clientX));
+    if (STATE.room) STATE.room.code_pane_width = w;
+    pane.style.width = w + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    if (STATE.room && STATE.room.code_pane_width != null) {
+      api(`/rooms/${STATE.room.id}`, "PUT", { code_pane_width: STATE.room.code_pane_width }).catch(() => {});
+    }
+  });
+})();
 $("#margin-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); marginSend(); }
 });
