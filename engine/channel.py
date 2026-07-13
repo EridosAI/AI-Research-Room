@@ -15,7 +15,6 @@ main.jsonl take the room lock (caller supplies it) — unlike margin.
 
 from __future__ import annotations
 
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -32,10 +31,11 @@ PRIMITIVES = (
     "request_compaction",
 )
 
-# in-process waiters for blocking tools (ask_design_question, control-mode writes)
-_waiters: dict[str, threading.Event] = {}
-_results: dict[str, Any] = {}
-_guard = threading.Lock()
+# Default wait for blocking tools when the caller passes timeout=None.
+# Must be shorter than the OpenCode turn budget so the tool can return an error
+# instead of hanging until the outer 30‑min POST dies.
+DEFAULT_BLOCK_TIMEOUT_S = 600.0   # 10 minutes
+_POLL_S = 0.35
 
 
 @dataclass
@@ -92,23 +92,40 @@ def _update_item(room_id: str, item_id: str, **fields) -> dict | None:
     return found
 
 
-def _register_waiter(item_id: str) -> threading.Event:
-    ev = threading.Event()
-    with _guard:
-        _waiters[item_id] = ev
-    return ev
+def _find_item(room_id: str, item_id: str) -> dict | None:
+    return next((i for i in _load_outbox(room_id) if i.get("id") == item_id), None)
 
 
-def _resolve_waiter(item_id: str, result: Any) -> None:
-    with _guard:
-        _results[item_id] = result
-        ev = _waiters.pop(item_id, None)
-    if ev is not None:
-        ev.set()
+def _wait_for_item(room_id: str, item_id: str, timeout: float | None) -> dict:
+    """Poll room.json outbox until the item leaves `pending` (cross-process safe).
+
+    OpenCode launches channel_mcp.py as a separate process. In-process Events
+    never see Fusion UI approvals — only disk does. So every blocking primitive
+    waits by re-reading the outbox.
+    """
+    limit = DEFAULT_BLOCK_TIMEOUT_S if timeout is None else float(timeout)
+    deadline = time.time() + max(0.0, limit)
+    while time.time() < deadline:
+        it = _find_item(room_id, item_id)
+        if it is None:
+            return {"status": "missing", "id": item_id}
+        status = it.get("status") or "pending"
+        if status != "pending":
+            return {
+                "status": status,
+                "id": item_id,
+                "answer": it.get("answer"),
+                "result": it,
+            }
+        time.sleep(_POLL_S)
+    # timed out — leave item pending so the UI can still answer, or mark cancelled
+    _update_item(room_id, item_id, status="cancelled",
+                 answer=f"timeout after {int(limit)}s")
+    return {"status": "timeout", "id": item_id, "answer": f"timeout after {int(limit)}s"}
 
 
 def cancel_pending(room_id: str, reason: str = "cancelled") -> int:
-    """Wake every blocked waiter for a room and mark pending items cancelled.
+    """Mark every pending outbox item cancelled (disk). Waiters see it on next poll.
 
     Called on stream disconnect / interrupt so a parked MCP tool does not hang.
     """
@@ -118,7 +135,6 @@ def cancel_pending(room_id: str, reason: str = "cancelled") -> int:
         if it.get("status") == "pending":
             it["status"] = "cancelled"
             it["answer"] = reason
-            _resolve_waiter(it["id"], {"status": "cancelled", "answer": reason})
             n += 1
     if n:
         _save_outbox(room_id, items)
@@ -159,7 +175,7 @@ def approve(room_id: str, item_id: str, *, answer: str | None = None,
     item["status"] = status
     item["answer"] = answer if kind == "ask_design_question" else None
     _save_outbox(room_id, items)
-    _resolve_waiter(item_id, {"status": status, "result": result, "answer": answer})
+    # waiters poll disk — no in-process Event to wake
     return item
 
 
@@ -167,7 +183,6 @@ def reject(room_id: str, item_id: str, reason: str = "rejected") -> dict:
     item = _update_item(room_id, item_id, status="rejected", answer=reason)
     if item is None:
         raise ValueError(f"no outbox item: {item_id}")
-    _resolve_waiter(item_id, {"status": "rejected", "answer": reason})
     return item
 
 
@@ -194,11 +209,7 @@ def comment_to_main(room_id: str, text: str, *, speaker: str = "code",
                               {"text": text, "speaker": speaker})
         if not wait:
             return item
-        ev = _register_waiter(item["id"])
-        if not ev.wait(timeout=timeout):
-            return {"status": "timeout", "id": item["id"]}
-        with _guard:
-            return _results.pop(item["id"], {"status": "unknown"})
+        return _wait_for_item(room_id, item["id"], timeout)
 
     note = transcript.make_turn(
         "converse", "note", speaker, text,
@@ -209,19 +220,17 @@ def comment_to_main(room_id: str, text: str, *, speaker: str = "code",
 
 def ask_design_question(room_id: str, question: str, *,
                         timeout: float | None = None) -> dict:
-    """Always blocking: outbox entry + wait for approve(answer=...)."""
+    """Always blocking: outbox entry + poll until approve(answer=...) on disk.
+
+    Cross-process: the MCP child and the Fusion UI are different processes;
+    approval is observed only via room.json outbox status.
+    """
     question = (question or "").strip()
     if not question:
         raise ValueError("ask_design_question requires a question")
     item = _append_outbox(room_id, "ask_design_question", {"question": question})
-    ev = _register_waiter(item["id"])
-    # auto mode still needs a human answer for design questions — but for tests
-    # and headless, auto can leave it pending until approve() is called.
-    if not ev.wait(timeout=timeout):
-        _update_item(room_id, item["id"], status="cancelled", answer="timeout")
-        return {"status": "timeout", "id": item["id"]}
-    with _guard:
-        return _results.pop(item["id"], {"status": "unknown"})
+    # auto mode still needs a human answer for design questions
+    return _wait_for_item(room_id, item["id"], timeout)
 
 
 def workspace_status(room_id: str) -> dict:
@@ -262,11 +271,7 @@ def request_compaction(room_id: str, note: str = "", *, wait: bool = True,
         return {"status": "approved", "id": item["id"], "note": note}
     if not wait:
         return item
-    ev = _register_waiter(item["id"])
-    if not ev.wait(timeout=timeout):
-        return {"status": "timeout", "id": item["id"]}
-    with _guard:
-        return _results.pop(item["id"], {"status": "unknown"})
+    return _wait_for_item(room_id, item["id"], timeout)
 
 
 # ---- MCP tool dispatch (stdio server entry uses this) -----------------------

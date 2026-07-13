@@ -169,7 +169,7 @@ def main() -> int:
     turns3 = transcript.load(rooms.main_path(rid2))
     check("approved comment landed", any("needs approval" in (t.get("text") or "") for t in turns3))
 
-    # ask_design_question blocks until approve
+    # ask_design_question blocks until approve — disk poll (cross-process safe)
     rooms.update_room(rid2, channel_mode="auto")  # still needs answer for questions
     result_box = {}
 
@@ -178,13 +178,28 @@ def main() -> int:
 
     th = threading.Thread(target=asker, daemon=True)
     th.start()
-    time.sleep(0.2)
+    time.sleep(0.4)
     pending = [i for i in channel.list_outbox(rid2) if i["status"] == "pending"
                and i["kind"] == "ask_design_question"]
     check("question is pending while blocked", len(pending) == 1)
     channel.approve(rid2, pending[0]["id"], answer="spaces")
-    th.join(timeout=3)
+    th.join(timeout=5)
     check("question returns answer", (result_box.get("r") or {}).get("answer") == "spaces")
+    # cross-process simulation: second process-like poll sees answered item
+    # (same module, but wait path is pure disk — no Event)
+    result_box2 = {}
+    def asker2():
+        result_box2["r"] = channel.ask_design_question(rid2, "disk poll?", timeout=3)
+    th2 = threading.Thread(target=asker2, daemon=True)
+    th2.start()
+    time.sleep(0.4)
+    pend2 = [i for i in channel.list_outbox(rid2) if i["status"] == "pending"
+             and i["kind"] == "ask_design_question"]
+    check("second question pending on disk", len(pend2) == 1)
+    # write answer via rooms.update_room (as if another process) then approve
+    channel.approve(rid2, pend2[0]["id"], answer="yes-disk")
+    th2.join(timeout=5)
+    check("disk-poll waiter got answer", (result_box2.get("r") or {}).get("answer") == "yes-disk")
 
     st = channel.workspace_status(rid2)
     check("workspace_status has channel_mode", "channel_mode" in st)

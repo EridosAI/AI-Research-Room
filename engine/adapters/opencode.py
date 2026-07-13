@@ -100,25 +100,33 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
     agents = ws / "AGENTS.md"
     if not agents.is_file():
         agents.write_text(_AGENTS_MD, encoding="utf-8")
-    # project opencode.json: permissions + fusion channel MCP (stdio)
+    # project opencode.json: permissions + fusion channel MCP (stdio).
+    # Always refresh so vault env + room_id stay correct after room moves / upgrades.
+    mcp_cmd = _channel_mcp_command(room_id)
+    from .. import settings
+    mcp_env = {
+        "RESEARCH_ROOM_VAULT": str(settings.VAULT_DIR),
+        "RESEARCH_ROOM_CONFIG": str(settings.CONFIG_TOML),
+        "RESEARCH_ROOM_HOME": str(settings.CONFIG_DIR),
+        "RESEARCH_ROOM_SECRETS": str(settings.SECRETS_FILE),
+    }
     oc = ws / "opencode.json"
-    if not oc.is_file():
-        mcp_cmd = _channel_mcp_command(room_id)
-        oc.write_text(json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                "fusion": {
-                    "type": "local",
-                    "command": mcp_cmd,
-                    "enabled": True,
-                }
-            },
-            "permission": {
-                "bash": "allow",
-                "edit": "allow",
-                "webfetch": "allow",
-            },
-        }, indent=2), encoding="utf-8")
+    oc.write_text(json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "fusion": {
+                "type": "local",
+                "command": mcp_cmd,
+                "enabled": True,
+                "environment": mcp_env,
+            }
+        },
+        "permission": {
+            "bash": "allow",
+            "edit": "allow",
+            "webfetch": "allow",
+        },
+    }, indent=2), encoding="utf-8")
     return ws
 
 
