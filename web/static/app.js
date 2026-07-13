@@ -39,6 +39,7 @@ let STATE = {
   codeStreaming: null,       // live code-seat bubble {text}
   codeAbort: null,           // AbortController for code stream
   outbox: [],                // pending diplomatic crossings for the active room
+  outboxPoll: null,          // interval id while code pane open / turn blocked
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
@@ -2448,6 +2449,43 @@ function codeStatus(msg, busy) {
   if (msg) s.appendChild(document.createTextNode(msg));
 }
 
+async function refreshOutbox() {
+  // Mid-turn poll: ask_design_question parks on outbox; without this the list stays
+  // "No pending…" until the stream ends (which never happens until you answer).
+  if (!STATE.room || !STATE.codeOpen) return;
+  try {
+    const d = await api(`/rooms/${STATE.room.id}/outbox`);
+    const next = d.outbox || [];
+    const prev = STATE.outbox || [];
+    const changed = JSON.stringify(next.map((i) => [i.id, i.status]))
+      !== JSON.stringify(prev.map((i) => [i.id, i.status]));
+    STATE.outbox = next;
+    if (d.channel_mode && STATE.room) STATE.room.channel_mode = d.channel_mode;
+    if (changed) renderCodePane();
+    const pending = next.filter((i) => i.status === "pending");
+    if (pending.length && STATE.codeStreaming) {
+      const q = pending[0];
+      const hint = q.kind === "ask_design_question"
+        ? `waiting for your answer: ${(q.payload && q.payload.question) || "question"}`
+        : `outbox: ${pending.length} pending — approve below`;
+      codeStatus(hint, true);
+    }
+  } catch (_e) { /* ignore poll errors */ }
+}
+
+function startOutboxPoll() {
+  stopOutboxPoll();
+  refreshOutbox();
+  STATE.outboxPoll = setInterval(refreshOutbox, 1500);
+}
+
+function stopOutboxPoll() {
+  if (STATE.outboxPoll) {
+    clearInterval(STATE.outboxPoll);
+    STATE.outboxPoll = null;
+  }
+}
+
 function codeSeatOptions() {
   // Always offer the full provider registry so the user can pick any seat for the code pane.
   // Room code_seats only records the current selection — it does not limit the menu.
@@ -2605,6 +2643,7 @@ function openCodePane() {
   }
   applyCodeWidth();
   renderCodePane();
+  startOutboxPoll();   // surface ask_design_question while the turn is parked
   codeStatus("attaching OpenCode session…", true);
   // force_new so we never keep a stale session that lacks fusion MCP tools
   api(`/rooms/${STATE.room.id}/code/attach`, "POST", { force_new: true }).then((d) => {
@@ -2617,6 +2656,7 @@ function openCodePane() {
     const sid = d.session_id ? d.session_id.slice(0, 12) : "?";
     const mcp = d.mcp_connected ? "mcp:ok" : "mcp:MISSING";
     codeStatus(`ready · ${mcp} · session ${sid} · :${d.port || "?"}`);
+    refreshOutbox();
   }).catch((e) => {
     // Surface the real failure (service not restarted / opencode missing / workspace) —
     // send will re-attach via the stream endpoint, so this is advisory.
@@ -2626,6 +2666,7 @@ function openCodePane() {
 
 function closeCodePane() {
   STATE.codeOpen = false;
+  stopOutboxPoll();
   if (STATE.codeAbort) { try { STATE.codeAbort.abort(); } catch (_e) { /* */ } }
   STATE.codeStreaming = null;
   $("#code-pane").classList.add("hidden");
