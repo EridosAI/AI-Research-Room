@@ -1,15 +1,35 @@
 # AGENTS.md — code seat contract
 
-This seat operates under the invariants in CLAUDE.md. Key rules restated below for every turn.
+This seat operates under the invariants in [CLAUDE.md](CLAUDE.md). Key rules for every turn:
 
-- Bright line = forward context exactly (never include raw panelist turns unless meta.is_panelist_raw).
-- Origin colour: stroke = voice of last speaker.
-- Guard-layer injection is the only way to reach the model.
-- Any crossing into main transcript goes through outbox/approval.
-- Workspace edits only inside the assigned native-Linux workspace_path.
-- Testing discipline: falsifiable fixtures + discriminating mutations for anything you write.
-- "Report only, change nothing" on recon tasks.
-- Use the 5 MCP diplomatic tools for communication with main chat:
-  `comment_to_main`, `query_main_state`, `ask_design_question`, `workspace_status`, `request_compaction`.
+## Where you sit
+- **Main transcript** — shared room chat. You do not write it by default.
+- **Code pane** — your private harness log + OpenCode session.
+- **Workspace** — native-Linux directory for all edits and commands.
 
-See [CLAUDE.md](CLAUDE.md) for complete discipline + paint conventions.
+## Role
+Implement, inspect, and verify in the workspace. You are not a blind panelist in main.
+
+## Diplomatic channel (fusion MCP only path to main)
+| Tool | Use |
+|------|-----|
+| `query_main_state` | Read forward-only main context (`last_1` / `last_3` / `full`) |
+| `comment_to_main` | Post a short from_code note (may need outbox approval) |
+| `ask_design_question` | Block until the room answers via outbox |
+| `workspace_status` | Workspace path, git short status, recent code notes |
+| `request_compaction` | Request context compaction via outbox |
+
+Tools may appear as `fusion_<name>`. Prefer them over bash for anything about the room.
+
+## Using main state
+- Treat `query_main_state` as shared background; align work to it.
+- Do not dump large main excerpts back into main.
+- Report results to the room with `comment_to_main` when they need to see them.
+
+## Discipline
+- Bright line = forward context only (no raw panelist turns unless stamped).
+- Guard-layer injection is the only model path for room seats.
+- Workspace edits only under the assigned `workspace_path`.
+- Testing: falsifiable fixtures + discriminating mutations for code you write.
+- Recon: report only, change nothing, unless asked to implement.
+- Bash is for workspace work (build/test/git), not for inventing a path into main.

@@ -43,7 +43,11 @@ def _log(msg: str) -> None:
 TOOLS = [
     {
         "name": "comment_to_main",
-        "description": "Post a note into the main room transcript (from_code). May require approval.",
+        "description": (
+            "Diplomatic: post a short note into the MAIN room transcript (meta.from_code). "
+            "May wait for outbox approval in control mode. Use for status/findings the room "
+            "must see. Do not use bash to fake a main-chat bridge."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"text": {"type": "string"}, "speaker": {"type": "string"}},
@@ -52,7 +56,11 @@ TOOLS = [
     },
     {
         "name": "query_main_state",
-        "description": "Read the synthesis-only forward view of the main transcript (windowed).",
+        "description": (
+            "Diplomatic: read a synthesis-only forward view of the MAIN transcript "
+            "(windowed last_1|last_3|full). Use as background for implementation; "
+            "not raw panelist internals."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -62,7 +70,11 @@ TOOLS = [
     },
     {
         "name": "ask_design_question",
-        "description": "Ask the room a design question and BLOCK until answered (outbox).",
+        "description": (
+            "Diplomatic: ask the human/room a design question and BLOCK until they answer "
+            "in the code-pane outbox. Prefer this when blocked on a choice only the room "
+            "can make. Do not busy-loop with bash while waiting."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"question": {"type": "string"}},
@@ -71,12 +83,19 @@ TOOLS = [
     },
     {
         "name": "workspace_status",
-        "description": "Non-blocking workspace + git + recent code-note summary.",
+        "description": (
+            "Diplomatic: non-blocking orientation — workspace_path, channel_mode, "
+            "git status --short, recent from_code notes, outbox pending count. "
+            "Prefer over ad-hoc bash for 'where am I'."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "request_compaction",
-        "description": "Request context compaction via the room outbox.",
+        "description": (
+            "Diplomatic: request context compaction via the room outbox "
+            "(auto-ack or control approval)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"note": {"type": "string"}},

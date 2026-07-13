@@ -287,9 +287,22 @@ def main() -> int:
     main_before = transcript.load(rooms.main_path(rid3))
     opencode._MOCK_CHAT = mock_chat
     try:
+        # capture system prompt shape
+        seen_sys = []
+        def cap_sys(p, payload, *, room_id, on_delta=None, abort=None, agent=None, variant=None):
+            seen_sys.append(payload.get("system") or "")
+            return mock_chat(p, payload, room_id=room_id, on_delta=on_delta, abort=abort,
+                             agent=agent, variant=variant)
+        opencode._MOCK_CHAT = cap_sys
         out = code_seat.code_turn(rid3, "implement isolation", seat="mockagent", mode="build")
         check("code_turn returns agent text", "agent:mockagent" in out and "Mode: BUILD" in out)
         check("build mode maps to build agent", "[build]" in out)
+        sys0 = seen_sys[-1] if seen_sys else ""
+        check("system names CODE SEAT role", "CODE SEAT" in sys0)
+        check("system explains main vs code pane", "MAIN transcript" in sys0 and "CODE pane" in sys0)
+        check("system lists diplomatic tools", "query_main_state" in sys0 and "ask_design_question" in sys0)
+        check("system prefers MCP over bash for room", "Prefer fusion MCP" in sys0 or "prefer" in sys0.lower())
+        opencode._MOCK_CHAT = mock_chat
         code_turns = code_seat.load_turns(rid3)
         check("code.jsonl has human+ai", len(code_turns) == 2
               and code_turns[0]["role"] == "human" and code_turns[1]["role"] == "ai")

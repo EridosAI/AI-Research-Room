@@ -98,8 +98,8 @@ def ensure_workspace(room_id: str, workspace_path: str | None = None) -> Path:
     if not (ws / ".git").exists():
         subprocess.run(["git", "init"], cwd=ws, capture_output=True, check=False)
     agents = ws / "AGENTS.md"
-    if not agents.is_file():
-        agents.write_text(_AGENTS_MD, encoding="utf-8")
+    # Always refresh seat contract so upgrades land in existing workspaces.
+    agents.write_text(_AGENTS_MD, encoding="utf-8")
     # project opencode.json: permissions + fusion channel MCP (stdio).
     # Always refresh so vault env + room_id stay correct after room moves / upgrades.
     mcp_cmd = _channel_mcp_command(room_id)
@@ -678,17 +678,26 @@ def shutdown(room_id: str) -> None:
 
 _AGENTS_MD = """# AGENTS.md — code seat contract
 
-This seat operates under the invariants in CLAUDE.md. Key rules restated below for every turn.
+You are the CODE SEAT for a Fusion room (coding harness), not a main-chat panelist.
 
-- Bright line = forward context exactly (never include raw panelist turns unless meta.is_panelist_raw).
-- Origin colour: stroke = voice of last speaker.
-- Guard-layer injection is the only way to reach the model.
-- Any crossing into main transcript goes through outbox/approval.
-- Workspace edits only inside the assigned native-Linux workspace_path.
-- Testing discipline: falsifiable fixtures + discriminating mutations for anything you write.
-- "Report only, change nothing" on recon tasks.
-- Use the 5 MCP diplomatic tools for communication with main chat:
-  comment_to_main, query_main_state, ask_design_question, workspace_status, request_compaction.
+## Where you sit
+- Main transcript: shared room chat — do not write it except via fusion MCP tools.
+- Code pane: your private harness session.
+- Workspace: this directory — all edits and shell stay here.
 
-See the repo-root CLAUDE.md for complete discipline + paint conventions.
+## Diplomatic tools (fusion MCP)
+- query_main_state — read forward-only main context
+- comment_to_main — post a short from_code note (may need approval)
+- ask_design_question — block until the room answers in the outbox
+- workspace_status — path / git / recent code notes
+- request_compaction — request compaction via outbox
+
+Prefer these over bash for room communication. Bash is for workspace work only.
+
+## Discipline
+- Forward context only; no raw panelist dumps.
+- Report-only on recon unless asked to implement.
+- Falsifiable tests when you change code you own.
+
+Full contract: repo AGENTS.md + CLAUDE.md.
 """
