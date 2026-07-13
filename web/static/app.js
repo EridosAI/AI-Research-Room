@@ -2453,6 +2453,8 @@ function codeStatus(msg, busy) {
 async function refreshOutbox() {
   // Mid-turn poll: ask_design_question parks on outbox; without this the list stays
   // "No pending…" until the stream ends (which never happens until you answer).
+  // Also pick up main-transcript growth from comment_to_main + auto-react (those writes
+  // do not set room.running, so watchActiveRoom would never poll).
   if (!STATE.room || !STATE.codeOpen) return;
   try {
     const d = await api(`/rooms/${STATE.room.id}/outbox`);
@@ -2472,6 +2474,16 @@ async function refreshOutbox() {
       codeStatus(hint, true);
     }
   } catch (_e) { /* ignore poll errors */ }
+  // Main may have grown from from_code note + react_to_code_note while we were busy.
+  try {
+    const view = await api(`/rooms/${STATE.room.id}`);
+    if (!STATE.room || STATE.room.id !== view.id) return;
+    const n = (view.turns || []).length;
+    if (n !== (STATE.turns || []).length) {
+      adoptRoom(view);
+      refreshRooms();
+    }
+  } catch (_e) { /* ignore */ }
 }
 
 function startOutboxPoll() {
@@ -2845,13 +2857,14 @@ async function codeSend() {
       STATE.codeTurns = data.code_turns || STATE.codeTurns.filter((t) => !(t.meta && t.meta._optimistic));
       STATE.outbox = data.outbox || STATE.outbox;
       renderCodePane();
+      // comment_to_main + auto-react write main while the code stream runs — pull main now
+      try {
+        const view = await api(`/rooms/${roomId}`);
+        if (STATE.room && STATE.room.id === roomId) adoptRoom(view);
+      } catch (_e) { /* */ }
     }
-    // isolation invariant: main transcript length must not grow from a code-pane send
-    if ((STATE.turns || []).length !== mainCountBefore) {
-      codeStatus("warning: main transcript changed during code send");
-    } else {
-      codeStatus("done");
-    }
+    const mainGrew = (STATE.turns || []).length > mainCountBefore;
+    codeStatus(mainGrew ? "done · main updated from code seat" : "done");
   } catch (e) {
     // drop optimistic-only bubble if nothing was committed; keep server-backed turns
     STATE.codeTurns = (STATE.codeTurns || []).filter((t) => !(t.meta && t.meta._optimistic && t.text === text));
