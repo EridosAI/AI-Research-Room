@@ -407,7 +407,7 @@ def get_participants() -> dict:
     """Speaker colours + addressee list for the UI. No secrets — not guarded."""
     return {"participants": [
         {"name": k, "color": p.color, "enabled": p.enabled, "auth_mode": p.auth_mode,
-         "model": p.model, "base_url": p.base_url, "reasoning": p.reasoning,
+         "backend": p.backend, "model": p.model, "base_url": p.base_url, "reasoning": p.reasoning,
          "context_window": p.context_window, "effort_options": _effort_options(p),
          **_window_view(p)}
         for k, p in providers.registry().items()

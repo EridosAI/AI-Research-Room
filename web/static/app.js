@@ -2433,16 +2433,10 @@ function codeStatus(msg, busy) {
 }
 
 function codeSeatOptions() {
-  // Prefer the room's assigned code_seats; fall back to agent-backend providers; if neither
-  // yields names, offer the full registry so the user can assign a first seat (39.1).
-  const assigned = (STATE.room && STATE.room.code_seats) || [];
-  const agents = (STATE.participants || []).filter((p) => p.backend === "agent").map((p) => p.name);
+  // Always offer the full provider registry so the user can pick any seat for the code pane.
+  // Room code_seats only records the current selection — it does not limit the menu.
   const all = (STATE.participants || []).map((p) => p.name);
-  const keys = assigned.length ? assigned.slice()
-    : agents.length ? agents
-    : all;
-  // keep order stable; drop unknowns only when we have registry metadata
-  return keys.filter((k, i) => keys.indexOf(k) === i);
+  return all.filter((k, i) => all.indexOf(k) === i);
 }
 
 function renderCodePane() {
@@ -2455,7 +2449,9 @@ function renderCodePane() {
   const cur = (STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || seats[0] || "";
   seatSel.innerHTML = `<option value="">seat…</option>` + seats.map((name) => {
     const p = providerOf(name);
-    const label = p ? `${p.name}${p.backend === "agent" ? "" : ` (${p.backend})`}` : name;
+    // label = key; optional model in parens when it differs from the key
+    const model = p && p.model ? p.model : "";
+    const label = model && model !== name ? `${name} · ${model}` : name;
     return `<option value="${name}"${name === cur ? " selected" : ""}>${label}</option>`;
   }).join("");
   // default selection on open: first assigned/available seat (persisted if room had none)
