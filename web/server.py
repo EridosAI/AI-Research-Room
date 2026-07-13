@@ -798,6 +798,25 @@ def attach_code_seat(room_id: str) -> dict:
     }
 
 
+@app.post("/rooms/{room_id}/code/clear")
+def clear_code_seat(room_id: str) -> dict:
+    """Wipe code.jsonl (pane transcript only). Does not touch main or OpenCode session files."""
+    _require_room(room_id)
+    code_seat.clear_turns(room_id)
+    return {"ok": True, "code_turns": [], "room_id": room_id}
+
+
+@app.post("/rooms/{room_id}/code/interrupt")
+def interrupt_code_seat(room_id: str) -> dict:
+    """Stop an in-flight OpenCode turn (abort + cancel channel waiters)."""
+    _require_room(room_id)
+    try:
+        opencode.interrupt(room_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+    return {"ok": True, "room_id": room_id}
+
+
 class CodeBody(BaseModel):
     prompt: str
     seat: str | None = None

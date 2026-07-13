@@ -273,6 +273,7 @@
             <option value="auto">auto</option>
             <option value="control">control</option>
           </select>
+          <button id="code-clear" title="clear code pane transcript (code.jsonl only)">clear</button>
           <button id="code-close" title="hide the code pane">×</button>
         </div>
         <div id="code-meta" class="code-meta"></div>
@@ -295,8 +296,9 @@
             <span class="code-harness-hint">code seat only · main via outbox</span>
           </div>
           <div class="margin-composer code-composer">
-            <textarea id="code-input" rows="3" placeholder="Instruct the code seat… (Enter to send · Shift+Enter newline)"></textarea>
-            <button id="code-send" title="send to code seat only — never main transcript">send to code</button>
+            <textarea id="code-input" rows="3" placeholder="Instruct the code seat… (Enter to send · mid-run send interrupts first)"></textarea>
+            <button id="code-stop" class="code-stop hidden" title="stop the current OpenCode turn">stop</button>
+            <button id="code-send" title="send to code seat only — never main transcript; interrupts if busy">send to code</button>
           </div>
         </div>
         <div id="code-status" class="status"></div>

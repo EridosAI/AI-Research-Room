@@ -2631,11 +2631,53 @@ function closeCodePane() {
   focusComposer();
 }
 
+function setCodeBusy(busy) {
+  const stop = $("#code-stop");
+  if (stop) stop.classList.toggle("hidden", !busy);
+  const send = $("#code-send");
+  if (send) send.textContent = busy ? "interrupt + send" : "send to code";
+}
+
+async function codeStop() {
+  if (!STATE.room) return;
+  codeStatus("stopping…", true);
+  try {
+    if (STATE.codeAbort) {
+      try { STATE.codeAbort.abort(); } catch (_e) { /* */ }
+    }
+    await api(`/rooms/${STATE.room.id}/code/interrupt`, "POST");
+  } catch (e) {
+    codeStatus(`stop: ${e.message}`);
+    return;
+  }
+  STATE.codeStreaming = null;
+  setCodeBusy(false);
+  codeStatus("stopped.");
+  renderCodeStream();
+}
+
+async function codeClear() {
+  if (!STATE.room) return;
+  if (STATE.codeStreaming || STATE.codeAbort) {
+    await codeStop();
+  }
+  try {
+    await api(`/rooms/${STATE.room.id}/code/clear`, "POST");
+    STATE.codeTurns = [];
+    STATE.codeStreaming = null;
+    renderCodePane();
+    codeStatus("cleared.");
+  } catch (e) {
+    codeStatus(`clear failed: ${e.message}`);
+  }
+}
+
 async function streamCodeSeat(roomId, body) {
   // Isolated SSE path — never touches main transcript / streamConverse.
   const ctrl = new AbortController();
   STATE.codeAbort = ctrl;
   STATE.codeStreaming = { text: "" };
+  setCodeBusy(true);
   renderCodeStream();
   let raf = 0;
   try {
@@ -2680,15 +2722,30 @@ async function streamCodeSeat(roomId, body) {
   } finally {
     STATE.codeAbort = null;
     STATE.codeStreaming = null;
+    setCodeBusy(false);
   }
 }
 
 async function codeSend() {
   if (!STATE.room) return;
-  if (STATE.codeStreaming) { codeStatus("code seat already working…"); return; }
   const input = $("#code-input");
   const text = (input && input.value || "").trim();
   if (!text) return;
+  // Mid-run send: interrupt the live turn, then start the new prompt (coding-harness style).
+  if (STATE.codeStreaming || STATE.codeAbort) {
+    codeStatus("interrupting…", true);
+    try {
+      if (STATE.codeAbort) { try { STATE.codeAbort.abort(); } catch (_e) { /* */ } }
+      await api(`/rooms/${STATE.room.id}/code/interrupt`, "POST");
+    } catch (e) {
+      codeStatus(`interrupt failed: ${e.message}`);
+      return;
+    }
+    STATE.codeStreaming = null;
+    setCodeBusy(false);
+    // brief yield so the previous fetch's finally settles
+    await new Promise((r) => setTimeout(r, 80));
+  }
   const seat = ($("#code-seat") && $("#code-seat").value)
     || (STATE.room.code_seats && STATE.room.code_seats[0]);
   if (!seat) { codeStatus("pick a code seat first."); return; }
@@ -2723,6 +2780,7 @@ async function codeSend() {
     // drop optimistic-only bubble if nothing was committed; keep server-backed turns
     STATE.codeTurns = (STATE.codeTurns || []).filter((t) => !(t.meta && t.meta._optimistic && t.text === text));
     renderCodeStream();
+    setCodeBusy(false);
     if (e && e.name === "AbortError") codeStatus("stopped.");
     else codeStatus(`code failed: ${e.message}`);
   }
@@ -2760,6 +2818,10 @@ const _codeClose = $("#code-close");
 if (_codeClose) _codeClose.addEventListener("click", closeCodePane);
 const _codeSend = $("#code-send");
 if (_codeSend) _codeSend.addEventListener("click", codeSend);
+const _codeStop = $("#code-stop");
+if (_codeStop) _codeStop.addEventListener("click", codeStop);
+const _codeClear = $("#code-clear");
+if (_codeClear) _codeClear.addEventListener("click", codeClear);
 const _codeInput = $("#code-input");
 if (_codeInput) _codeInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); codeSend(); }

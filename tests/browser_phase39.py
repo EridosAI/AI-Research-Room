@@ -167,8 +167,16 @@ def main() -> int:
             check("Ask mode button present", page.locator("#code-mode-ask").count() == 1)
             check("reasoning selector present", page.locator("#code-reasoning").count() == 1)
             check("send-to-code label", "code" in (page.locator("#code-send").inner_text() or "").lower())
+            check("clear button present", page.locator("#code-clear").count() == 1)
+            check("stop button present", page.locator("#code-stop").count() == 1)
             check("code stream present", page.locator("#code-stream").count() == 1)
             check("code splitter present", page.locator("#code-splitter").count() == 1)
+            # clear wipes pane transcript via API
+            page.click("#code-clear")
+            page.wait_for_timeout(300)
+            stream_txt = page.locator("#code-stream").inner_text()
+            check("clear empties stream chrome", "harness" in stream_txt.lower() or "no" in stream_txt.lower()
+                  or "empty" in stream_txt.lower() or "code seat" in stream_txt.lower())
             # ultrawide-ish width: code pane default min width
             cw = page.locator("#code-pane").evaluate("e => e.getBoundingClientRect().width")
             check("code pane is wide (>= 360)", cw >= 360)

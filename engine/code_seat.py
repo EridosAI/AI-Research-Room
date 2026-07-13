@@ -81,3 +81,10 @@ def code_turn(room_id: str, prompt: str, *, seat: str | None = None,
 
 def load_turns(room_id: str) -> list[dict]:
     return transcript.load(rooms.code_path(room_id))
+
+
+def clear_turns(room_id: str) -> None:
+    """Wipe the isolated code-pane log (code.jsonl only — never main)."""
+    path = rooms.code_path(room_id)
+    if path.is_file():
+        path.write_text("", encoding="utf-8")

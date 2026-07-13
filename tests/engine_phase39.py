@@ -319,6 +319,12 @@ def main() -> int:
     check("code_pane_width is mutable", "code_pane_width" in rooms._MUTABLE)
     rooms.update_room(rid3, code_pane_width=720)
     check("code_pane_width round-trip", rooms.load_room(rid3).get("code_pane_width") == 720)
+    # clear wipes code.jsonl only
+    n_before = len(code_seat.load_turns(rid3))
+    check("clear has turns to wipe", n_before >= 2)
+    code_seat.clear_turns(rid3)
+    check("clear empties code.jsonl", code_seat.load_turns(rid3) == [])
+    check("clear left main alone", transcript.load(rooms.main_path(rid3)) == main_before)
 
     print()
     print(f"{'ALL PASS' if _fails == 0 else f'{_fails} FAILED'}")
