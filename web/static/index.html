@@ -276,9 +276,15 @@
           <button id="code-clear" title="clear code pane transcript (code.jsonl only)">clear</button>
           <button id="code-close" title="hide the code pane">×</button>
         </div>
-        <div id="code-meta" class="code-meta"></div>
+        <div id="code-meta" class="code-meta">seat: — · workspace: — · mcp: —</div>
         <div id="code-stream" class="code-stream"></div>
-        <div id="outbox-list" class="outbox-list"></div>
+        <div class="outbox-panel">
+          <div class="outbox-head">
+            <span class="outbox-title">outbox</span>
+            <span id="outbox-count" class="outbox-count">0 pending</span>
+          </div>
+          <div id="outbox-list" class="outbox-list"></div>
+        </div>
         <div class="code-harness">
           <div class="code-harness-modes" title="harness mode — stays inside the code seat">
             <button type="button" id="code-mode-build" class="code-mode active" data-mode="build">Build</button>

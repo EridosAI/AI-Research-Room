@@ -40,6 +40,7 @@ let STATE = {
   codeAbort: null,           // AbortController for code stream
   outbox: [],                // pending diplomatic crossings for the active room
   outboxPoll: null,          // interval id while code pane open / turn blocked
+  codeMcp: null,             // true|false|null — fusion MCP connected (from attach)
   staged: [],                // composer-staged files [{filename, content}] (Phase 22)
   drafts: {},                // room_id -> composer draft; session-only, NOT persisted (Phase 31.2)
   marginDrafts: {},          // room_id -> margin draft; session-only (Phase 31.2)
@@ -2558,14 +2559,26 @@ function renderCodePane() {
   if (meta) {
     const ws = (STATE.room && STATE.room.workspace_path) || "(default on attach)";
     const seatLabel = cur || "—";
-    meta.textContent = `seat: ${seatLabel} · workspace: ${ws}`;
+    const mcp = STATE.codeMcp === true ? "mcp:ok"
+      : STATE.codeMcp === false ? "mcp:MISSING" : "mcp:…";
+    meta.innerHTML = "";
+    meta.appendChild(document.createTextNode(`seat: ${seatLabel} · workspace: ${ws} · `));
+    const mcpEl = document.createElement("span");
+    mcpEl.className = STATE.codeMcp === true ? "mcp-ok" : STATE.codeMcp === false ? "mcp-bad" : "";
+    mcpEl.textContent = mcp;
+    meta.appendChild(mcpEl);
   }
   renderCodeModes();
   renderCodeStream();
   list.innerHTML = "";
   const pending = (STATE.outbox || []).filter((i) => i.status === "pending");
+  const countEl = $("#outbox-count");
+  if (countEl) {
+    countEl.textContent = `${pending.length} pending`;
+    countEl.classList.toggle("has-pending", pending.length > 0);
+  }
   if (!pending.length) {
-    list.innerHTML = '<div class="empty">No pending channel crossings.</div>';
+    list.innerHTML = '<div class="empty">No pending channel crossings — they appear here when the code seat calls ask_design_question / comment_to_main (control mode).</div>';
     return;
   }
   for (const item of pending) {
@@ -2654,12 +2667,16 @@ function openCodePane() {
       renderCodePane();
     }
     const sid = d.session_id ? d.session_id.slice(0, 12) : "?";
-    const mcp = d.mcp_connected ? "mcp:ok" : "mcp:MISSING";
+    STATE.codeMcp = !!d.mcp_connected;
+    const mcp = STATE.codeMcp ? "mcp:ok" : "mcp:MISSING";
     codeStatus(`ready · ${mcp} · session ${sid} · :${d.port || "?"}`);
+    renderCodePane();   // refresh meta mcp badge
     refreshOutbox();
   }).catch((e) => {
     // Surface the real failure (service not restarted / opencode missing / workspace) —
     // send will re-attach via the stream endpoint, so this is advisory.
+    STATE.codeMcp = false;
+    renderCodePane();
     codeStatus(`attach failed: ${e.message} — try send (re-attaches) or restart fusion`);
   });
 }
