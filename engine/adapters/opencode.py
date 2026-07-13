@@ -153,6 +153,50 @@ def _opencode_bin() -> str:
     return "opencode"
 
 
+def _openrouter_key() -> str | None:
+    """Pull an OpenRouter-compatible key from Fusion secrets (never log it).
+
+    OpenCode serve only auto-loads OPENROUTER_API_KEY from the environment —
+    it does not read Fusion's secrets.json. Without this, every message 500s
+    with UnknownError (0 credentials in opencode auth list).
+    """
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"]
+    try:
+        from .. import secrets
+        # Prefer an OR-named seat; any key works (Jason's secrets share one OR key).
+        for k in ("deepseek-v4-flash-or", "glm-5-2-or", "claude-or",
+                  "chat-gpt-5-5-or", "deepseek", "openrouter"):
+            v = secrets.get(k)
+            if v:
+                return v
+        # last resort: first non-empty secret
+        from .. import settings
+        if settings.SECRETS_FILE.is_file():
+            import json
+            data = json.loads(settings.SECRETS_FILE.read_text(encoding="utf-8"))
+            for v in (data or {}).values():
+                if isinstance(v, str) and v.strip():
+                    return v
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _serve_env() -> dict:
+    """Environment for `opencode serve` — PATH + auth keys OpenCode recognizes."""
+    env = os.environ.copy()
+    oc = _opencode_bin()
+    oc_dir = str(Path(oc).resolve().parent)
+    env["PATH"] = oc_dir + os.pathsep + env.get("PATH", "")
+    key = _openrouter_key()
+    if key:
+        env["OPENROUTER_API_KEY"] = key
+        # some OpenCode builds also accept these aliases
+        env.setdefault("OPENAI_API_KEY", key)
+    return env
+
+
 def _pick_port() -> int:
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -174,12 +218,12 @@ def start_serve(room_id: str, workspace: Path | None = None) -> ServeHandle:
                 pass
 
     port = _pick_port()
-    env = os.environ.copy()
-    # service PATH is sparse — ensure nvm node bin is visible for child tools
+    env = _serve_env()
+    if not env.get("OPENROUTER_API_KEY"):
+        raise RuntimeError(
+            "no OpenRouter key for OpenCode — set OPENROUTER_API_KEY or add an "
+            "OpenRouter seat key in ⚙ Providers / secrets.json")
     oc = _opencode_bin()
-    oc_dir = str(Path(oc).resolve().parent)
-    env["PATH"] = oc_dir + os.pathsep + env.get("PATH", "")
-    # non-interactive: OpenRouter key already in env for the service user
     log_path = ws / ".opencode-serve.log"
     logf = open(log_path, "ab", buffering=0)  # noqa: SIM115 — owned by process lifetime
     proc = subprocess.Popen(
@@ -214,30 +258,33 @@ def start_serve(room_id: str, workspace: Path | None = None) -> ServeHandle:
 
 
 def attach_or_create_session(room_id: str, *, model: dict | None = None) -> ServeHandle:
-    """Ensure serve + session. Re-uses healthy port/session from room.json when possible."""
+    """Ensure serve + session. Re-uses healthy port/session from room.json when possible.
+
+    If a re-attached serve was started without credentials (pre-39.3b), kill and
+    respawn so OPENROUTER_API_KEY is present — otherwise every message 500s.
+    """
     from .. import rooms
     room = rooms.load_room(room_id)
     ws = ensure_workspace(room_id, room.get("workspace_path") or None)
 
-    port = room.get("opencode_port")
-    sid = room.get("opencode_session_id")
-    if port and _healthy(int(port)):
-        h = ServeHandle(room_id=room_id, workspace=ws, port=int(port), proc=None, session_id=sid)
-        if sid:
-            try:
-                _req("GET", f"{_base(h.port)}/session/{sid}", timeout=5)
-                with _handles_guard:
-                    _handles[room_id] = h
-                return h
-            except Exception:  # noqa: BLE001
-                sid = None
-        # healthy serve, no session → create
-        sess = _req("POST", f"{_base(h.port)}/session", {})
-        h.session_id = sess.get("id")
-        rooms.update_room(room_id, opencode_session_id=h.session_id, opencode_port=h.port)
-        with _handles_guard:
-            _handles[room_id] = h
-        return h
+    # Prefer a handle we started in this process (known to carry OPENROUTER_API_KEY).
+    with _handles_guard:
+        owned = _handles.get(room_id)
+    if owned and owned.proc and owned.proc.poll() is None and _healthy(owned.port):
+        if not owned.session_id:
+            sess = _req("POST", f"{_base(owned.port)}/session", {})
+            owned.session_id = sess.get("id")
+            rooms.update_room(room_id, opencode_session_id=owned.session_id,
+                              opencode_port=owned.port)
+        return owned
+
+    # Stale port/session in room.json often points at an orphaned serve started WITHOUT
+    # credentials (pre-39.3b). Never re-attach to those — clear and spawn with keys.
+    if room.get("opencode_port") or room.get("opencode_session_id"):
+        try:
+            rooms.update_room(room_id, opencode_port=None, opencode_session_id=None)
+        except Exception:  # noqa: BLE001
+            pass
 
     h = start_serve(room_id, ws)
     sess = _req("POST", f"{_base(h.port)}/session", {})
@@ -266,14 +313,21 @@ def interrupt(room_id: str) -> None:
 
 
 def _parse_model(p) -> dict:
-    """Provider.model may be 'provider/model' or bare model id."""
+    """Map a Fusion Provider to OpenCode's {providerID, modelID}.
+
+    OpenRouter seats must use providerID=openrouter with the FULL model string as
+    modelID (e.g. deepseek/deepseek-v4-pro). Splitting on '/' would send
+    providerID=deepseek, which OpenCode has no credentials for → HTTP 500.
+    """
     m = (getattr(p, "model", None) or "").strip()
-    if "/" in m:
-        prov, mid = m.split("/", 1)
-        return {"providerID": prov, "modelID": mid}
-    if m:
-        return {"providerID": "openrouter", "modelID": m}
-    return dict(_DEFAULT_MODEL)
+    base = (getattr(p, "base_url", None) or "") or ""
+    # Jason's registry is OpenRouter-first; treat OR base_url or vendor/slug as OR.
+    if "openrouter.ai" in base or "/" in m or not m:
+        mid = m or _DEFAULT_MODEL["modelID"]
+        if mid.startswith("openrouter/"):
+            mid = mid[len("openrouter/"):]
+        return {"providerID": "openrouter", "modelID": mid}
+    return {"providerID": "openrouter", "modelID": m}
 
 
 def _payload_to_prompt(payload: dict) -> str:

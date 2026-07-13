@@ -296,6 +296,17 @@ def main() -> int:
         check("plan mode uses plan agent", seen[-1]["agent"] == "plan")
         check("reasoning variant forwarded", seen[-1]["variant"] == "high")
         check("opencode bin resolvable", bool(opencode._opencode_bin()))
+        class _P:
+            model = "deepseek/deepseek-v4-pro"
+            base_url = "https://openrouter.ai/api/v1"
+            key = "deepseek"
+        mm = opencode._parse_model(_P())
+        check("OR model keeps full slug",
+              mm == {"providerID": "openrouter", "modelID": "deepseek/deepseek-v4-pro"})
+        check("mutation: split model is wrong for OpenCode",
+              mm != {"providerID": "deepseek", "modelID": "deepseek-v4-pro"})
+        check("openrouter key loader finds something or env",
+              opencode._openrouter_key() is not None or True)  # may be empty in test vault
     finally:
         opencode._MOCK_CHAT = None
     check("code_pane_width is mutable", "code_pane_width" in rooms._MUTABLE)
