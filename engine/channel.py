@@ -115,6 +115,8 @@ def _wait_for_item(room_id: str, item_id: str, timeout: float | None) -> dict:
                 "status": status,
                 "id": item_id,
                 "answer": it.get("answer"),
+                "main_reply": it.get("main_reply"),
+                "main_speaker": it.get("main_speaker"),
                 "result": it,
             }
         time.sleep(_POLL_S)
@@ -174,6 +176,10 @@ def approve(room_id: str, item_id: str, *, answer: str | None = None,
     status = "answered" if kind == "ask_design_question" else "approved"
     item["status"] = status
     item["answer"] = answer if kind == "ask_design_question" else None
+    # surface main auto-reply to blocked MCP waiters (control-mode comment)
+    if kind == "comment_to_main" and isinstance(result, dict):
+        item["main_reply"] = result.get("main_reply")
+        item["main_speaker"] = result.get("main_speaker")
     _save_outbox(room_id, items)
     # waiters poll disk — no in-process Event to wake
     return item
@@ -216,16 +222,36 @@ def comment_to_main(room_id: str, text: str, *, speaker: str = "code",
         {"from_code": True, "model": speaker})
     transcript.append(note, rooms.main_path(room_id))
     # Main seats should not leave from_code notes sitting unanswered: trigger one
-    # AI reply on main (no synthetic human turn). Best-effort — never fail the
-    # diplomatic write if the reaction fails (no seat, API down, etc.).
-    react = True
-    if react:
-        try:
-            from . import modes
-            modes.react_to_code_note(room_id, note_id=note.get("id"))
-        except Exception:  # noqa: BLE001
-            pass
-    return note
+    # AI reply on main (no synthetic human turn). Mirror that reply into code.jsonl
+    # and return it so the OpenCode tool result carries the acknowledgment back
+    # into the code-seat turn (closes the loop).
+    main_reply = None
+    main_speaker = None
+    try:
+        from . import modes
+        main_reply = modes.react_to_code_note(room_id, note_id=note.get("id"))
+        # find speaker of the reaction turn (last ai with react_to_code)
+        for t in reversed(transcript.load(rooms.main_path(room_id))):
+            if (t.get("meta") or {}).get("react_to_code") and (t.get("meta") or {}).get("code_note_id") == note.get("id"):
+                main_speaker = t.get("speaker")
+                break
+        if main_reply:
+            # code pane log — so the harness UI shows main's acknowledgment
+            ack = transcript.make_turn(
+                "code", "note", main_speaker or "main", main_reply,
+                {"from_main": True, "react_to_code": True,
+                 "code_note_id": note.get("id"), "model": main_speaker or "main"})
+            transcript.append(ack, rooms.code_path(room_id))
+    except Exception:  # noqa: BLE001 — never fail the diplomatic write
+        pass
+    return {
+        "status": "posted",
+        "note": note,
+        "main_reply": main_reply,
+        "main_speaker": main_speaker,
+        "id": note.get("id"),
+        "text": text,
+    }
 
 
 def ask_design_question(room_id: str, question: str, *,

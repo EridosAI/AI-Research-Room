@@ -45,8 +45,9 @@ TOOLS = [
         "name": "comment_to_main",
         "description": (
             "Diplomatic: post a short note into the MAIN room transcript (meta.from_code). "
-            "May wait for outbox approval in control mode. Use for status/findings the room "
-            "must see. Do not use bash to fake a main-chat bridge."
+            "May wait for outbox approval in control mode. After posting, main auto-replies; "
+            "the tool result includes main_reply (acknowledgment from the room). "
+            "Use that reply as confirmation the room received you. Do not use bash to fake a bridge."
         ),
         "inputSchema": {
             "type": "object",
@@ -186,7 +187,21 @@ def _handle(msg: dict) -> dict | None:
         try:
             from engine import channel  # noqa: WPS433 — lazy
             out = channel.dispatch_tool(ROOM_ID, name, args)
-            text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
+            if isinstance(out, str):
+                text = out
+            elif isinstance(out, dict) and name == "comment_to_main":
+                # Make the room's acknowledgment obvious to the code seat in the tool result.
+                parts = [f"status={out.get('status') or 'posted'}"]
+                if out.get("text"):
+                    parts.append(f"posted: {out.get('text')}")
+                if out.get("main_reply"):
+                    who = out.get("main_speaker") or "main"
+                    parts.append(f"main_reply from [{who}]:\n{out.get('main_reply')}")
+                elif out.get("status") == "pending":
+                    parts.append("awaiting outbox approval")
+                text = "\n".join(parts)
+            else:
+                text = json.dumps(out, ensure_ascii=False, default=str)
             return _result(mid, {"content": [{"type": "text", "text": text}]})
         except Exception as e:  # noqa: BLE001
             _log(f"tools/call {name}: {type(e).__name__}: {e}\n{traceback.format_exc()}")

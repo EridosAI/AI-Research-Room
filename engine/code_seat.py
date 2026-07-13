@@ -71,8 +71,9 @@ These tools are the ONLY approved path between you and the main transcript:
 
 2. comment_to_main(text, speaker?)
    - Post a short note into main (stamped from_code). May require outbox approval.
-   - Use for status, findings, or answers the room needs to see.
-   - Keep notes concise and actionable.
+   - After the note lands, main auto-replies; the tool result includes main_reply —
+     treat that as the room's acknowledgment. Also mirrored into this code pane.
+   - Use for status, findings, or answers the room needs to see. Keep notes concise.
 
 3. ask_design_question(question)
    - Ask the human/room a question and BLOCK until they answer via the outbox.

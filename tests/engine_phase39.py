@@ -149,14 +149,20 @@ def main() -> int:
     bg2 = channel.query_main_state(rid2, "full")
     check("query_main_state excludes raw panelist", "RAW SECRET" not in bg2)
 
-    note = channel.comment_to_main(rid2, "coder notes: done", speaker="mockagent")
-    check("comment_to_main returns note turn", note.get("role") == "note")
+    note_res = channel.comment_to_main(rid2, "coder notes: done", speaker="mockagent")
+    check("comment_to_main returns posted status", note_res.get("status") == "posted")
+    note = note_res.get("note") or {}
     check("meta.from_code stamped", (note.get("meta") or {}).get("from_code") is True)
+    check("main_reply returned to code seat", bool(note_res.get("main_reply")))
     turns = transcript.load(rooms.main_path(rid2))
     check("note on main.jsonl", any((t.get("meta") or {}).get("from_code") for t in turns))
     # auto-react: a main AI turn should follow the from_code note
     check("main seat reacts to from_code note",
           any(t.get("role") == "ai" and (t.get("meta") or {}).get("react_to_code") for t in turns))
+    # acknowledgment mirrored into code.jsonl for the code pane
+    code_turns = transcript.load(rooms.code_path(rid2))
+    check("main ack mirrored into code.jsonl",
+          any((t.get("meta") or {}).get("from_main") for t in code_turns))
     # from_code is forward (not is_panelist_raw)
     fwd = build_context(turns, "mock", "converse", participants=["mock"])
     fwd_text = json.dumps(fwd)

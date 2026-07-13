@@ -408,6 +408,8 @@ input, textarea { color: var(--text-primary); }
   border-left: 2px solid var(--border-strong); padding-left: 8px; }
 .code-turn.a .body { font-size: var(--text-sm); }
 .code-turn.streaming .body { opacity: .9; }
+.code-turn.from-main .body { border-left: 2px solid var(--accent); padding-left: 8px; }
+.code-turn.from-main .who { color: var(--accent); }
 .outbox-panel { flex: 0 0 auto; max-height: 32%; display: flex; flex-direction: column;
   border-top: 1px solid var(--border-subtle); background: var(--bg-secondary, var(--bg-elevated)); }
 .outbox-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px 0;

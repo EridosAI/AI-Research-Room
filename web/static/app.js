@@ -2474,12 +2474,13 @@ async function refreshOutbox() {
       codeStatus(hint, true);
     }
   } catch (_e) { /* ignore poll errors */ }
-  // Main may have grown from from_code note + react_to_code_note while we were busy.
+  // Main and/or code.jsonl may have grown (from_code + main auto-reply mirrored back).
   try {
     const view = await api(`/rooms/${STATE.room.id}`);
     if (!STATE.room || STATE.room.id !== view.id) return;
     const n = (view.turns || []).length;
-    if (n !== (STATE.turns || []).length) {
+    const cn = (view.code_turns || []).length;
+    if (n !== (STATE.turns || []).length || cn !== (STATE.codeTurns || []).length) {
       adoptRoom(view);
       refreshRooms();
     }
@@ -2524,10 +2525,12 @@ function renderCodeStream() {
   box.dataset.hasContent = "1";
   for (const t of turns) {
     const isQ = t.role === "human";
-    const div = el("div", "code-turn " + (isQ ? "q" : "a"));
+    const fromMain = t.meta && t.meta.from_main;
+    const div = el("div", "code-turn " + (isQ ? "q" : "a") + (fromMain ? " from-main" : ""));
     const mode = (t.meta && t.meta.code_mode) || "";
-    const extra = mode ? mode : "";
-    div.appendChild(whoLine(isQ ? "you" : t.speaker, colorOf(isQ ? "human" : t.speaker), extra));
+    const extra = fromMain ? "from main" : (mode || "");
+    const who = isQ ? "you" : (fromMain ? `${t.speaker || "main"}` : t.speaker);
+    div.appendChild(whoLine(who, colorOf(isQ ? "human" : (t.speaker || "human")), extra));
     const body = el("div", "body"); renderMd(body, t.text); div.appendChild(body);
     box.appendChild(div);
   }
