@@ -185,7 +185,12 @@ def _handle(msg: dict) -> dict | None:
         if not ROOM_ID:
             return _error(mid, -32000, "room_id not configured")
         try:
-            from engine import channel  # noqa: WPS433 — lazy
+            # Reload every call: OpenCode keeps this stdio process alive for the
+            # whole serve, so a deploy would otherwise leave stale channel.py
+            # (e.g. missing main_reply mirror) until the serve is killed.
+            import importlib
+            from engine import channel as _ch  # noqa: WPS433
+            channel = importlib.reload(_ch)
             out = channel.dispatch_tool(ROOM_ID, name, args)
             if isinstance(out, str):
                 text = out

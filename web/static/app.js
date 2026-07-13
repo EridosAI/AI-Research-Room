@@ -2860,14 +2860,21 @@ async function codeSend() {
       STATE.codeTurns = data.code_turns || STATE.codeTurns.filter((t) => !(t.meta && t.meta._optimistic));
       STATE.outbox = data.outbox || STATE.outbox;
       renderCodePane();
-      // comment_to_main + auto-react write main while the code stream runs — pull main now
+      // comment_to_main + auto-react write main AND mirror main_reply into code.jsonl
+      // while the stream is live — pull full room (main + code_turns) after done.
       try {
         const view = await api(`/rooms/${roomId}`);
-        if (STATE.room && STATE.room.id === roomId) adoptRoom(view);
+        if (STATE.room && STATE.room.id === roomId) {
+          adoptRoom(view);
+          // adoptRoom already sets code_turns when present; ensure we re-render code
+          renderCodePane();
+        }
       } catch (_e) { /* */ }
     }
     const mainGrew = (STATE.turns || []).length > mainCountBefore;
-    codeStatus(mainGrew ? "done · main updated from code seat" : "done");
+    const hasMainAck = (STATE.codeTurns || []).some((t) => t.meta && t.meta.from_main);
+    codeStatus(hasMainAck ? "done · main ack in code pane"
+      : mainGrew ? "done · main updated from code seat" : "done");
   } catch (e) {
     // drop optimistic-only bubble if nothing was committed; keep server-backed turns
     STATE.codeTurns = (STATE.codeTurns || []).filter((t) => !(t.meta && t.meta._optimistic && t.text === text));
