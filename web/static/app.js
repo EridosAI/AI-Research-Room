@@ -2432,20 +2432,39 @@ function codeStatus(msg, busy) {
   if (msg) s.appendChild(document.createTextNode(msg));
 }
 
+function codeSeatOptions() {
+  // Prefer the room's assigned code_seats; fall back to agent-backend providers; if neither
+  // yields names, offer the full registry so the user can assign a first seat (39.1).
+  const assigned = (STATE.room && STATE.room.code_seats) || [];
+  const agents = (STATE.participants || []).filter((p) => p.backend === "agent").map((p) => p.name);
+  const all = (STATE.participants || []).map((p) => p.name);
+  const keys = assigned.length ? assigned.slice()
+    : agents.length ? agents
+    : all;
+  // keep order stable; drop unknowns only when we have registry metadata
+  return keys.filter((k, i) => keys.indexOf(k) === i);
+}
+
 function renderCodePane() {
   const seatSel = $("#code-seat");
   const modeSel = $("#channel-mode");
   const meta = $("#code-meta");
   const list = $("#outbox-list");
   if (!seatSel || !list) return;
-  const agents = (STATE.participants || []).filter((p) => p.backend === "agent");
-  const cur = (STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || "";
-  seatSel.innerHTML = `<option value="">seat…</option>` + agents.map(
-    (p) => `<option value="${p.name}"${p.name === cur ? " selected" : ""}>${p.name}</option>`).join("");
+  const seats = codeSeatOptions();
+  const cur = (STATE.room && STATE.room.code_seats && STATE.room.code_seats[0]) || seats[0] || "";
+  seatSel.innerHTML = `<option value="">seat…</option>` + seats.map((name) => {
+    const p = providerOf(name);
+    const label = p ? `${p.name}${p.backend === "agent" ? "" : ` (${p.backend})`}` : name;
+    return `<option value="${name}"${name === cur ? " selected" : ""}>${label}</option>`;
+  }).join("");
+  // default selection on open: first assigned/available seat (persisted if room had none)
+  if (cur && seatSel.value !== cur) seatSel.value = cur;
   if (modeSel && STATE.room) modeSel.value = STATE.room.channel_mode || "auto";
   if (meta) {
     const ws = (STATE.room && STATE.room.workspace_path) || "(default on attach)";
-    meta.textContent = `workspace: ${ws}`;
+    const seatLabel = cur || "—";
+    meta.textContent = `seat: ${seatLabel} · workspace: ${ws}`;
   }
   list.innerHTML = "";
   const pending = (STATE.outbox || []).filter((i) => i.status === "pending");
@@ -2508,10 +2527,18 @@ function openCodePane() {
   STATE.codeOpen = true;
   $("#code-pane").classList.remove("hidden");
   $("#code-splitter").classList.remove("hidden");
+  // default-on-attach: if the room has no code_seats yet, pick the first available option
+  // and persist it so the dropdown has a real selection (39.1).
+  const seats = codeSeatOptions();
+  if (seats.length && !(STATE.room.code_seats && STATE.room.code_seats.length)) {
+    STATE.room.code_seats = [seats[0]];
+    api(`/rooms/${STATE.room.id}`, "PUT", { code_seats: STATE.room.code_seats }).catch(() => {});
+  }
   renderCodePane();
   api(`/rooms/${STATE.room.id}/code/attach`, "POST").then((d) => {
     if (STATE.room && d.room) {
       STATE.room.workspace_path = d.room.workspace_path || STATE.room.workspace_path;
+      if (d.room.code_seats) STATE.room.code_seats = d.room.code_seats;
       renderCodePane();
     }
   }).catch((e) => codeStatus(`attach: ${e.message}`));
